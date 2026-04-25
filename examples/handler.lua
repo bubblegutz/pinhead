@@ -40,7 +40,7 @@ sshfs.listen("127.0.0.1:2222")
 
 -- Route registrations -------------------------------------------------------
 
-route.register("/", {"lookup", "getattr", "readdir"}, function(params, data)
+route.register("/", {"lookup", "getattr", "readdir", "open", "release"}, function(params, data)
     return "root directory"
 end)
 

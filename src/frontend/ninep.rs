@@ -354,18 +354,20 @@ async fn handle_walk(
 
     let parent_path;
     let parent_qid;
+    let parent_is_dir;
     {
         let state = shared.state.lock().await;
         let parent = state.fids.get(&fid).ok_or("unknown fid")?.clone();
         parent_path = parent.path;
         parent_qid = parent.qid;
+        parent_is_dir = parent.is_dir;
     }
 
     let mut cur_path = parent_path;
     let mut cur_qid = parent_qid;
     let mut wqids = Vec::new();
     let mut offset = 10;
-    let mut is_dir = false;
+    let mut is_dir = parent_is_dir;
 
     for _ in 0..nwname {
         if offset + 2 > body.len() {
