@@ -77,7 +77,9 @@ async fn main() {
     let router_h = tokio::spawn(router_h);
 
     // ── 6. Spawn frontends based on config ──────────────────────────────
-    let has_config = !cfg.fuse_mounts.is_empty() || !cfg.ninep_listeners.is_empty();
+    let has_config = !cfg.fuse_mounts.is_empty()
+        || !cfg.ninep_listeners.is_empty()
+        || !cfg.sshfs_listeners.is_empty();
 
     if has_config {
         for path in &cfg.fuse_mounts {
@@ -89,12 +91,16 @@ async fn main() {
             let tx = frontend_tx.clone();
             if let Some(path) = listener.strip_prefix("sock:") {
                 let path = path.to_string();
+                let client_path = path.clone();
                 tokio::spawn(async move {
                     if let Err(e) = frontend::ninep::serve(tx, &path).await {
                         eprintln!("[9p-socket] error: {e}");
                     }
                 });
-                tokio::spawn(run_ninep_client("/tmp/pinhead-9p.sock"));
+                tokio::spawn(async move {
+                    run_ninep_client(&client_path).await;
+                });
+            } else if let Some(addr) = listener.strip_prefix("tcp:") {
             } else if let Some(addr) = listener.strip_prefix("tcp:") {
                 let addr = addr.to_string();
                 tokio::spawn(async move {
@@ -113,16 +119,24 @@ async fn main() {
                 eprintln!("[main] unknown 9p listener prefix: {listener}");
             }
         }
+
+        for listener in &cfg.sshfs_listeners {
+            let tx = frontend_tx.clone();
+            let addr = listener.to_string();
+            let sshfs_cfg = frontend::sshfs::SshfsConfig {
+                password: cfg.sshfs_password.clone(),
+                authorized_keys_path: cfg.sshfs_authorized_keys_path.clone(),
+                userpasswds: cfg.sshfs_userpasswds.clone(),
+            };
+            tokio::spawn(async move {
+                if let Err(e) = frontend::sshfs::serve(tx, &addr, sshfs_cfg).await {
+                    eprintln!("[sshfs] error: {e}");
+                }
+            });
+        }
     } else {
-        eprintln!("[main] no frontend config, running simulated demo");
-        let fuse_h = tokio::spawn(run_fuse_frontend(frontend_tx.clone()));
-        let ninep_h = tokio::spawn(run_ninep_client("/tmp/pinhead-9p.sock"));
-        let ftx = frontend_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = frontend::ninep::serve(ftx, "/tmp/pinhead-9p.sock").await {
-                eprintln!("[9p-server] error: {e}");
-            }
-        });
+        eprintln!("[main] no frontend config — add ninep.listen(...), fuse.mount(...), or sshfs.listen(...) to your script");
+        tokio::spawn(run_fuse_frontend(frontend_tx.clone()));
     }
 
     // ── 7. Run everything concurrently ──────────────────────────────────

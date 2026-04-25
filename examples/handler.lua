@@ -1,20 +1,44 @@
 -- pinhead Lua handler script
 --
--- Routes are registered via `route.register(pattern, ops, func)` where `ops`
--- is a single operation name (string), a list of names (table), or nil/true
--- for all operations.  Each handler receives (params, data):
---   params : table  (path parameters, e.g. {id="42"})
---   data   : string or nil (write payload)
+-- Frontend configuration (fuse.*, ninep.*, sshfs.*):
+--   fuse.mount("/path")              -- FUSE mount point
+--   fuse.unmount("/path")            -- remove a mount
+--   fuse.unmountall()                -- remove all mounts
+--   ninep.listen("sock:/path")       -- 9P over Unix socket
+--   ninep.listen("tcp:ip:port")      -- 9P over TCP
+--   ninep.listen("udp:ip:port")      -- 9P over UDP
+--   ninep.kill(addr)                 -- stop a 9P listener
+--   ninep.killall()                  -- stop all 9P listeners
+--   sshfs.listen("ip:port")          -- SSH/SFTP server on TCP
+--   sshfs.kill(addr)                 -- stop an SSH listener
+--   sshfs.killall()                  -- stop all SSH listeners
+--   sshfs.password(pw)               -- set global auth password
+--   sshfs.authorized_keys(path)      -- ed25519 authorized_keys file
+--   sshfs.userpasswd(user, pw)       -- add a username/password pair
 --
--- Frontend configuration is done via the `fuse.*` and `ninep.*` namespaces:
---   fuse.mount("/path/to/mountpoint")     -- FUSE mount point
---   fuse.unmount("/path/to/mountpoint")   -- remove a mount
---   fuse.unmountall()                      -- remove all mounts
---   ninep.listen("sock:/tmp/pinhead.sock") -- 9P over Unix socket
---   ninep.listen("tcp:127.0.0.1:5640")     -- 9P over TCP
---   ninep.listen("udp:127.0.0.1:5641")     -- 9P over UDP
---   ninep.kill("sock:/tmp/pinhead.sock")   -- stop a listener
---   ninep.killall()                         -- stop all listeners
+-- Load users from a separate file:
+--   local users = dofile("users.lua")
+--   for _, pair in ipairs(users) do sshfs.userpasswd(pair[1], pair[2]) end
+-- users.lua format: return {{"alice", "hunter2"}, {"bob", "letmein"}}
+
+-- Users (inline table; also see dofile pattern above).
+local users = {
+    {"alice", "hunter2"},
+    {"bob", "letmein"},
+}
+for _, pair in ipairs(users) do
+    sshfs.userpasswd(pair[1], pair[2])
+end
+-- Alternatively, for a single global password (any username accepted):
+-- sshfs.password("hunter2")
+-- Or use ed25519 public key auth:
+-- sshfs.authorized_keys("/home/alice/.ssh/authorized_keys")
+
+-- Listeners — all sockets come from here, not from Rust.
+ninep.listen("sock:/tmp/pinhead.sock")
+sshfs.listen("127.0.0.1:2222")
+
+-- Route registrations -------------------------------------------------------
 
 route.register("/", {"lookup", "getattr", "readdir"}, function(params, data)
     return "root directory"

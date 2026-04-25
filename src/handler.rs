@@ -48,11 +48,15 @@ pub struct RouteRegistration {
 // Configuration (returned from Lua setup)
 // ---------------------------------------------------------------------------
 
-/// Configuration values set by the Lua script via `fuse.*()` / `ninep.*()`.
+/// Configuration values set by the Lua script via `fuse.*()` / `ninep.*()` / `sshfs.*()`.
 #[derive(Debug, Default, Clone)]
 pub struct Config {
     pub fuse_mounts: Vec<String>,
     pub ninep_listeners: Vec<String>,
+    pub sshfs_listeners: Vec<String>,
+    pub sshfs_password: Option<String>,
+    pub sshfs_authorized_keys_path: Option<String>,
+    pub sshfs_userpasswds: Vec<(String, String)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +92,10 @@ impl HandlerRuntime {
         // ── Shared state for configuration ───────────────────────────────
         let fuse_mounts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let ninep_listeners: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sshfs_listeners: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sshfs_password: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sshfs_authorized_keys_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sshfs_userpasswds: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
 
         // ── Build the `route` table ──────────────────────────────────────
         {
@@ -259,6 +267,97 @@ impl HandlerRuntime {
                 .map_err(|e| format!("{e}"))?;
         }
 
+        // ── Build the `sshfs` table ──────────────────────────────────────
+        {
+            let sshfs_table = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            // sshfs.listen(addr)
+            {
+                let listeners = sshfs_listeners.clone();
+                let fn_ = lua
+                    .create_function(move |_, addr: String| {
+                        listeners.lock().unwrap().push(addr);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table
+                    .set("listen", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            // sshfs.kill(addr)
+            {
+                let listeners = sshfs_listeners.clone();
+                let fn_ = lua
+                    .create_function(move |_, addr: String| {
+                        listeners.lock().unwrap().retain(|a| a != &addr);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table.set("kill", fn_).map_err(|e| format!("{e}"))?;
+            }
+
+            // sshfs.killall()
+            {
+                let listeners = sshfs_listeners.clone();
+                let fn_ = lua
+                    .create_function(move |_, ()| {
+                        listeners.lock().unwrap().clear();
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table
+                    .set("killall", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            // sshfs.password(pw)
+            {
+                let password = sshfs_password.clone();
+                let fn_ = lua
+                    .create_function(move |_, pw: String| {
+                        *password.lock().unwrap() = Some(pw);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table
+                    .set("password", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            // sshfs.authorized_keys(path)
+            {
+                let keys = sshfs_authorized_keys_path.clone();
+                let fn_ = lua
+                    .create_function(move |_, path: String| {
+                        *keys.lock().unwrap() = Some(path);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table
+                    .set("authorized_keys", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            // sshfs.userpasswd(username, password)
+            {
+                let pairs = sshfs_userpasswds.clone();
+                let fn_ = lua
+                    .create_function(move |_, (user, pw): (String, String)| {
+                        pairs.lock().unwrap().push((user, pw));
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table
+                    .set("userpasswd", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            lua.globals()
+                .set("sshfs", sshfs_table)
+                .map_err(|e| format!("{e}"))?;
+        }
+
         // Execute the script.
         lua.load(script)
             .exec()
@@ -282,6 +381,10 @@ impl HandlerRuntime {
         let cfg = Config {
             fuse_mounts: fuse_mounts.lock().unwrap().clone(),
             ninep_listeners: ninep_listeners.lock().unwrap().clone(),
+            sshfs_listeners: sshfs_listeners.lock().unwrap().clone(),
+            sshfs_password: sshfs_password.lock().unwrap().clone(),
+            sshfs_authorized_keys_path: sshfs_authorized_keys_path.lock().unwrap().clone(),
+            sshfs_userpasswds: sshfs_userpasswds.lock().unwrap().clone(),
         };
 
         Ok((
