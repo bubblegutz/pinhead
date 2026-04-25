@@ -1,0 +1,16 @@
+[package]
+name = "pinhead"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
+matchit = "0.9"
+async-trait = "0.1"
+bytes = "1"
+fuser = { version = "0.17", features = ["libfuse3"], optional = true }
+rlua = "0.20"
+
+[features]
+default = ["fuse"]
+fuse = ["dep:fuser"]
