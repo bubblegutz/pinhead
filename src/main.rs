@@ -1,3 +1,4 @@
+mod env;
 mod fsop;
 mod handler;
 mod frontend;
@@ -9,6 +10,7 @@ mod router; // keep after handler for types
 
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 
@@ -78,6 +80,7 @@ async fn main() {
     let router_h = tokio::spawn(router_h);
 
     // ── 6. Spawn frontends based on config ──────────────────────────────
+    let mut frontend_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let has_config = !cfg.fuse_mounts.is_empty()
         || !cfg.ninep_listeners.is_empty()
         || !cfg.sshfs_listeners.is_empty();
@@ -91,26 +94,29 @@ async fn main() {
             let tx = frontend_tx.clone();
             if let Some(path) = listener.strip_prefix("sock:") {
                 let path = path.to_string();
-                tokio::spawn(async move {
+                let h = tokio::spawn(async move {
                     if let Err(e) = frontend::ninep::serve(tx, &path).await {
                         eprintln!("[9p-socket] error: {e}");
                     }
                 });
+                frontend_handles.push(h);
 
             } else if let Some(_addr) = listener.strip_prefix("tcp:") {
                 let addr = _addr.to_string();
-                tokio::spawn(async move {
+                let h = tokio::spawn(async move {
                     if let Err(e) = frontend::ninep::serve_tcp(tx, &addr).await {
                         eprintln!("[9p-tcp] error: {e}");
                     }
                 });
+                frontend_handles.push(h);
             } else if let Some(addr) = listener.strip_prefix("udp:") {
                 let addr = addr.to_string();
-                tokio::spawn(async move {
+                let h = tokio::spawn(async move {
                     if let Err(e) = frontend::ninep::serve_udp(tx, &addr).await {
                         eprintln!("[9p-udp] error: {e}");
                     }
                 });
+                frontend_handles.push(h);
             } else {
                 eprintln!("[main] unknown 9p listener prefix: {listener}");
             }
@@ -124,24 +130,47 @@ async fn main() {
                 authorized_keys_path: cfg.sshfs_authorized_keys_path.clone(),
                 userpasswds: cfg.sshfs_userpasswds.clone(),
             };
-            tokio::spawn(async move {
+            let h = tokio::spawn(async move {
                 if let Err(e) = frontend::sshfs::serve(tx, &addr, sshfs_cfg).await {
                     eprintln!("[sshfs] error: {e}");
                 }
             });
+            frontend_handles.push(h);
         }
     }
 
     // ── 7. Run everything concurrently ──────────────────────────────────
+    let mut sigint =
+        signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
     tokio::select! {
         _ = local     => eprintln!("[main] Lua handler exited"),
         _ = router_h  => eprintln!("[main] router task exited"),
+        _ = sigint.recv() => eprintln!("[main] received SIGINT, shutting down"),
     }
 
+    // ── 8. Cleanup: kill frontends, unmount, remove sockets ────────────
     drop(frontend_tx);
-    // Brief pause for in-flight 9P responses.
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
+    for path in &cfg.fuse_mounts {
+        eprintln!("[main] FUSE unmount: {path} (TODO)");
+    }
+
+    for listener in &cfg.ninep_listeners {
+        eprintln!("[main] 9p kill: {listener}");
+    }
+
+    for listener in &cfg.sshfs_listeners {
+        eprintln!("[main] ssh kill: {listener}");
+    }
+
+    // Abort all frontend tasks — this drops their futures, which triggers
+    // cleanup guards (e.g. SocketCleanup in ninep serve removes socket files).
+    for h in frontend_handles {
+        h.abort();
+    }
+
+    // Brief pause for in-flight responses and cleanup guards.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     eprintln!("=== pinhead: done ===");
 }
 

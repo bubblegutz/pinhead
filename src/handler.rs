@@ -502,6 +502,9 @@ impl HandlerRuntime {
         // ── Build the `doc` and `sql` tables ──────────────────────────────
         store::register_lua_apis(&lua).map_err(|e| format!("store API: {e}"))?;
 
+        // ── Build the `env` table ─────────────────────────────────────────
+        crate::env::register_lua_apis(&lua).map_err(|e| format!("env API: {e}"))?;
+
         // Execute the script.
         lua.load(script)
             .exec()

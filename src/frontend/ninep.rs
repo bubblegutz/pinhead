@@ -15,6 +15,19 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::fsop::FsOperation;
 use crate::router::Request;
 
+// ── Socket cleanup guard ─────────────────────────────────────────────
+/// Removes the socket file on drop (i.e. when the server future is
+/// cancelled or the function returns).
+struct SocketCleanup {
+    path: String,
+}
+
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 // ── 9P2000 message types ──────────────────────────────────────────────
 const TVERSION: u8 = 100;
 const RVERSION: u8 = 101;
@@ -177,6 +190,12 @@ pub async fn serve(
     let _ = tokio::fs::remove_file(socket_path).await;
     let listener = UnixListener::bind(socket_path)?;
     eprintln!("[9p] listening on {socket_path}");
+
+    // SocketCleanup runs Drop when this future is cancelled/aborted,
+    // ensuring the socket file is removed on exit.
+    let _cleanup = SocketCleanup {
+        path: socket_path.to_string(),
+    };
 
     let shared = Arc::new(Shared {
         state: Mutex::new(NinepState::new()),
