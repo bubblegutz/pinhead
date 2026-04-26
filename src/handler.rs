@@ -5,6 +5,8 @@ use bytes::Bytes;
 use rlua::{Lua, RegistryKey, Value};
 use tokio::sync::oneshot;
 
+use crate::serialize;
+
 use crate::fsop::FsOperation;
 
 // ---------------------------------------------------------------------------
@@ -356,6 +358,125 @@ impl HandlerRuntime {
             lua.globals()
                 .set("sshfs", sshfs_table)
                 .map_err(|e| format!("{e}"))?;
+        }
+
+        // ── Build the `json` table ─────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, val: rlua::Value| {
+                    serialize::json_encode(lua, val).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, val: rlua::Value| {
+                    serialize::json_encode_pretty(lua, val).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("enc_pretty", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, text: String| {
+                    serialize::json_decode(lua, text).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, (text, path): (String, String)| {
+                    serialize::json_query(lua, text, path).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+            lua.globals().set("json", t).map_err(|e| format!("{e}"))?;
+        }
+
+        // ── Build the `yaml` table ─────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, val: rlua::Value| {
+                    serialize::yaml_encode(lua, val).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, text: String| {
+                    serialize::yaml_decode(lua, text).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, (text, path): (String, String)| {
+                    serialize::yaml_query(lua, text, path).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+            lua.globals().set("yaml", t).map_err(|e| format!("{e}"))?;
+        }
+
+        // ── Build the `toml` table ─────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, val: rlua::Value| {
+                    serialize::toml_encode(lua, val).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, text: String| {
+                    serialize::toml_decode(lua, text).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, (text, path): (String, String)| {
+                    serialize::toml_query(lua, text, path).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+            lua.globals().set("toml", t).map_err(|e| format!("{e}"))?;
+        }
+
+        // ── Build the `csv` table ──────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, val: rlua::Value| {
+                    serialize::csv_encode(lua, val).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, text: String| {
+                    serialize::csv_decode(lua, text).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+            let fn_ = lua
+                .create_function(|lua, (text, filter): (String, String)| {
+                    serialize::csv_query(lua, text, filter).map_err(rlua::Error::RuntimeError)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+            lua.globals().set("csv", t).map_err(|e| format!("{e}"))?;
         }
 
         // Execute the script.
