@@ -22,7 +22,7 @@ use serde_json::Value as Json;
 
 // ── Lua ↔ serde_json::Value conversion ──────────────────────────────────────
 
-fn lua_to_json(lua: &rlua::Lua, val: rlua::Value) -> Result<Json, String> {
+pub(crate) fn lua_to_json(lua: &rlua::Lua, val: rlua::Value) -> Result<Json, String> {
     match val {
         rlua::Value::Nil => Ok(Json::Null),
         rlua::Value::Boolean(b) => Ok(Json::Bool(b)),

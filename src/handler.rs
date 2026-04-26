@@ -479,6 +479,25 @@ impl HandlerRuntime {
             lua.globals().set("csv", t).map_err(|e| format!("{e}"))?;
         }
 
+        // ── Build the `req` table ──────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            for &method in &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
+                let method_str = method.to_string();
+                let fn_ = lua
+                    .create_function(move |lua, (url, opts): (String, Option<rlua::Table>)| {
+                        crate::req::do_request(lua, &method_str, url, opts)
+                            .map_err(rlua::Error::RuntimeError)
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                t.set(method.to_lowercase(), fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            lua.globals().set("req", t).map_err(|e| format!("{e}"))?;
+        }
+
         // Execute the script.
         lua.load(script)
             .exec()

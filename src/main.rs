@@ -1,6 +1,7 @@
 mod fsop;
 mod handler;
 mod frontend;
+mod req;
 mod serialize;
 
 mod router; // keep after handler for types
