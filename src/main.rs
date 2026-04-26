@@ -81,13 +81,23 @@ async fn main() {
 
     // ── 6. Spawn frontends based on config ──────────────────────────────
     let mut frontend_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut fuse_sessions: Vec<_> = Vec::new();
     let has_config = !cfg.fuse_mounts.is_empty()
         || !cfg.ninep_listeners.is_empty()
         || !cfg.sshfs_listeners.is_empty();
 
+    eprintln!("[debug] has_config={has_config} fuse_mounts={} ninep={} sshfs={}",
+        cfg.fuse_mounts.len(), cfg.ninep_listeners.len(), cfg.sshfs_listeners.len());
+
     if has_config {
         for path in &cfg.fuse_mounts {
-            eprintln!("[main] FUSE mount: {path} (TODO: real FUSE daemon)");
+            let tx = frontend_tx.clone();
+            let path = path.clone();
+            eprintln!("[main] FUSE mount: {path}");
+            match frontend::fuse::mount(tx, &path) {
+                Ok(bg) => fuse_sessions.push(bg),
+                Err(e) => eprintln!("[fuse] mount error: {e}"),
+            }
         }
 
         for listener in &cfg.ninep_listeners {
@@ -152,7 +162,7 @@ async fn main() {
     drop(frontend_tx);
 
     for path in &cfg.fuse_mounts {
-        eprintln!("[main] FUSE unmount: {path} (TODO)");
+        eprintln!("[main] FUSE unmount: {path} (auto-unmount on BackgroundSession drop)");
     }
 
     for listener in &cfg.ninep_listeners {
@@ -168,6 +178,9 @@ async fn main() {
     for h in frontend_handles {
         h.abort();
     }
+
+    // FUSE sessions: drop triggers auto-unmount (BackgroundSession).
+    drop(fuse_sessions);
 
     // Brief pause for in-flight responses and cleanup guards.
     tokio::time::sleep(Duration::from_millis(100)).await;

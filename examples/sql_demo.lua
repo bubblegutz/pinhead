@@ -3,7 +3,7 @@
 -- Opens a database, registers routes that lazy-initialise tables
 -- and seed data on first request (avoids blocking issues during setup).
 
-local db_path = os.getenv("PINHEAD_SQL_DB") or "/tmp/pinhead-sql-demo.db"
+local db_path = env.get("PINHEAD_SQL_DB") or "/tmp/pinhead-sql-demo.db"
 local h = sql.open(db_path)
 
 -- Lazy init: create tables and seed data on first request.
@@ -75,7 +75,13 @@ for _, pair in ipairs(users) do
     sshfs.userpasswd(pair[1], pair[2])
 end
 
-local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead-sql-demo.sock"
+local listen_addr = env.get("PINHEAD_LISTEN") or "sock:/tmp/pinhead-sql-demo.sock"
 ninep.listen(listen_addr)
-local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+local ssh_listen = env.get("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
 sshfs.listen(ssh_listen)
+
+-- FUSE mount — activated via PINHEAD_FUSE_MOUNT env var for e2e tests.
+local fuse_mount = env.get("PINHEAD_FUSE_MOUNT")
+if fuse_mount then
+    fuse.mount(fuse_mount)
+end

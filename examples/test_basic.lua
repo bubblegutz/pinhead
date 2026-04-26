@@ -41,7 +41,13 @@ for _, pair in ipairs(users) do
 end
 
 -- Listeners — override via PINHEAD_LISTEN / PINHEAD_SSH_LISTEN env vars for e2e tests.
-local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead-test-basic.sock"
+local listen_addr = env.get("PINHEAD_LISTEN") or "sock:/tmp/pinhead-test-basic.sock"
 ninep.listen(listen_addr)
-local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+local ssh_listen = env.get("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
 sshfs.listen(ssh_listen)
+
+-- FUSE mount — activated via PINHEAD_FUSE_MOUNT env var for e2e tests.
+local fuse_mount = env.get("PINHEAD_FUSE_MOUNT")
+if fuse_mount then
+    fuse.mount(fuse_mount)
+end

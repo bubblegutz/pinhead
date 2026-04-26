@@ -15,9 +15,6 @@ impl NinepStream for TcpStream {}
 // ── Transport abstraction ──────────────────────────────────────────────────
 
 /// All frontend protocols available in pinhead.
-///
-/// FUSE is intentionally omitted — it is not yet implemented
-/// (see "TODO: real FUSE daemon" in src/main.rs).
 #[derive(Debug, Clone)]
 pub enum Transport {
     /// 9P2000 over Unix socket.
@@ -28,6 +25,8 @@ pub enum Transport {
     NinepUdp(String),
     /// SSH/SFTP over TCP (password auth).
     Ssh(String),
+    /// FUSE mount (local directory).
+    Fuse(String),
 }
 
 impl Transport {
@@ -38,6 +37,7 @@ impl Transport {
             Transport::NinepTcp(a) => format!("tcp:{a}"),
             Transport::NinepUdp(a) => format!("udp:{a}"),
             Transport::Ssh(a) => a.clone(),
+            Transport::Fuse(p) => p.clone(),
         }
     }
 }
@@ -97,6 +97,11 @@ impl PinheadInstance {
                 // harmless address (the script always calls ninep.listen()).
                 cmd.env("PINHEAD_LISTEN", format!("sock:/tmp/pinhead-e2e-ssh-placeholder-{:x}.sock", id));
             }
+            Transport::Fuse(_) => {
+                cmd.env("PINHEAD_FUSE_MOUNT", &listen_val);
+                // Also pass PINHEAD_LISTEN placeholder like SSH does
+                cmd.env("PINHEAD_LISTEN", format!("sock:/tmp/pinhead-e2e-fuse-placeholder-{:x}.sock", id));
+            }
             _ => {
                 cmd.env("PINHEAD_LISTEN", &listen_val);
             }
@@ -114,6 +119,11 @@ impl PinheadInstance {
             Transport::NinepTcp(_) => Ok(()),
             Transport::NinepUdp(addr) => wait_for_udp(addr),
             Transport::Ssh(addr) => wait_for_port(addr),
+            Transport::Fuse(path) => {
+                cleanup.push(path.clone());
+                fs::create_dir_all(path).map_err(|e| format!("create mount dir: {e}"))?;
+                wait_for_fuse_mount(path)
+            }
         }?;
 
         Ok(Self {
@@ -145,6 +155,9 @@ impl PinheadInstance {
                 let client = SshClient::connect(addr, "alice", "hunter2")?;
                 Ok(Box::new(client))
             }
+            Transport::Fuse(path) => {
+                Ok(Box::new(FuseClient { mountpoint: path.clone() }))
+            }
         }
     }
 }
@@ -160,7 +173,11 @@ impl Drop for PinheadInstance {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         for p in &self.cleanup_paths {
-            let _ = fs::remove_file(p);
+            if std::path::Path::new(p).is_dir() {
+                let _ = fs::remove_dir_all(p);
+            } else {
+                let _ = fs::remove_file(p);
+            }
         }
     }
 }
@@ -215,6 +232,34 @@ pub fn wait_for_udp(addr: &str) -> Result<(), String> {
         }
         if start.elapsed() > Duration::from_secs(5) {
             return Err(format!("udp {addr} did not respond within 5s"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub fn wait_for_fuse_mount(path: &str) -> Result<(), String> {
+    let start = Instant::now();
+    // First wait for the mount directory to exist.
+    loop {
+        if let Ok(m) = std::fs::metadata(path) {
+            if m.is_dir() {
+                break;
+            }
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            return Err(format!("fuse mount dir {path} did not appear within 5s"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Then wait for the FUSE mount to appear in /proc/mounts.
+    loop {
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
+            if mounts.lines().any(|line| line.contains(path)) {
+                return Ok(());
+            }
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            return Err(format!("fuse mount {path} did not appear in /proc/mounts within 5s"));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -608,6 +653,27 @@ impl TestClient for SshClient {
             }
         };
         Err(err.message().to_string())
+    }
+}
+
+// ── FUSE Client ────────────────────────────────────────────────────────────
+
+pub struct FuseClient {
+    mountpoint: String,
+}
+
+impl TestClient for FuseClient {
+    fn read_file(&mut self, path: &str) -> Result<String, String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        std::fs::read_to_string(&full_path).map_err(|e| format!("fuse read: {e}"))
+    }
+
+    fn walk_nonexistent(&mut self, path: &str) -> Result<String, String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        match std::fs::metadata(&full_path) {
+            Ok(_) => Err("expected path to not exist, but metadata succeeded".into()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

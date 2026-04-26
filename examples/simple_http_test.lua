@@ -13,7 +13,7 @@ for _, pair in ipairs(users) do
     sshfs.userpasswd(pair[1], pair[2])
 end
 
-local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead-http-test.sock"
+local listen_addr = env.get("PINHEAD_LISTEN") or "sock:/tmp/pinhead-http-test.sock"
 ninep.listen(listen_addr)
-local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+local ssh_listen = env.get("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
 sshfs.listen(ssh_listen)

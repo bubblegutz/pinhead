@@ -10,6 +10,7 @@ fn handler_example() {
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),
         Transport::NinepUdp(format!("127.0.0.1:{}", find_free_port())),
         Transport::Ssh(format!("127.0.0.1:{}", find_free_port())),
+        Transport::Fuse(format!("/tmp/pinhead-e2e-handler-fuse-{:x}", unique_id())),
     ];
 
     run_scenarios(script, &transports, |client| {
