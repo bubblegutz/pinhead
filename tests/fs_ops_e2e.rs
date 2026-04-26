@@ -4,7 +4,7 @@ use common::*;
 
 #[test]
 fn fs_ops() {
-    let script = include_str!("../examples/fs_ops.lua");
+    let script = include_str!("../examples/fs_ops/main.lua");
     let transports = [
         Transport::NinepSock(format!("/tmp/pinhead-e2e-fs-ops-sock-{:x}.sock", unique_id())),
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),

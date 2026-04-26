@@ -16,23 +16,23 @@ local people = {
     {name = "Carol", age = 35, role = "manager"},
 }
 
-route.register("/json", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/json", function()
     return json.enc(book)
 end)
 
-route.register("/yaml", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/yaml", function()
     return yaml.enc(book)
 end)
 
-route.register("/toml", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/toml", function()
     return toml.enc(book)
 end)
 
-route.register("/csv", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/csv", function()
     return csv.enc(people)
 end)
 
-route.register("/roundtrip", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/roundtrip", function()
     -- Encode and then decode back to verify round-trip fidelity.
     local encoded = json.enc(book)
     local decoded = json.dec(encoded)
@@ -40,29 +40,48 @@ route.register("/roundtrip", {"lookup", "getattr", "read", "open", "release"}, f
 end)
 
 -- Query routes: encode data, query by path/filter, re-encode result.
-route.register("/json_query", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/json_query", function()
     local data = json.enc(book)
     local result = json.q(data, "title")
     return json.enc(result)
 end)
 
-route.register("/yaml_query", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/yaml_query", function()
     local data = yaml.enc(book)
     local result = yaml.q(data, "author")
     return json.enc(result)
 end)
 
-route.register("/toml_query", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/toml_query", function()
     local data = toml.enc(book)
     local result = toml.q(data, "year")
     return json.enc(result)
 end)
 
-route.register("/csv_query", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/csv_query", function()
     local data = csv.enc(people)
     local result = csv.q(data, "name=Alice")
     -- Re-encode the filtered rows as CSV
     return csv.enc(result)
+end)
+
+-- jq query routes: use full jq filter expressions via json.jq
+route.read("/jq_title", function()
+    local data = json.enc(book)
+    local result = json.jq(data, ".title")
+    return json.enc(result)
+end)
+
+route.read("/jq_tags", function()
+    local data = json.enc(book)
+    local result = json.jq(data, ".tags[]")
+    return json.enc(result)
+end)
+
+route.read("/jq_filtered", function()
+    local data = json.enc(people)
+    local result = json.jq(data, '.[] | select(.age > 30)')
+    return json.enc(result)
 end)
 
 local root_meta = {
@@ -75,9 +94,12 @@ local root_meta = {
     yaml_query = "GET /yaml_query → query YAML by path",
     toml_query = "GET /toml_query → query TOML by path",
     csv_query  = "GET /csv_query  → query CSV by filter",
+    jq_title   = "GET /jq_title   → jq query `.title`",
+    jq_tags    = "GET /jq_tags    → jq query `.tags[]`",
+    jq_filtered = "GET /jq_filtered → jq query `.[] | select(.age > 30)`",
 }
 
-route.register("/", {"lookup", "getattr", "readdir", "open", "release"}, function()
+route.readdir("/", function()
     return yaml.enc(root_meta)
 end)
 
@@ -88,12 +110,15 @@ local users = {
 }
 for _, pair in ipairs(users) do
     sshfs.userpasswd(pair[1], pair[2])
+    log.debug("added user: " .. pair[1])
 end
 
 local listen_addr = env.get("PINHEAD_LISTEN") or "sock:/tmp/pinhead-serialize.sock"
 ninep.listen(listen_addr)
+log.print("9P listener on " .. listen_addr)
 local ssh_listen = env.get("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
 sshfs.listen(ssh_listen)
+log.print("SSH listener on " .. ssh_listen)
 
 -- FUSE mount — activated via PINHEAD_FUSE_MOUNT env var for e2e tests.
 local fuse_mount = env.get("PINHEAD_FUSE_MOUNT")

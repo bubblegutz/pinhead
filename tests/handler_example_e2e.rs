@@ -4,7 +4,7 @@ use common::*;
 
 #[test]
 fn handler_example() {
-    let script = include_str!("../examples/handler.lua");
+    let script = include_str!("../examples/handler/main.lua");
     let transports = [
         Transport::NinepSock(format!("/tmp/pinhead-e2e-handler-sock-{:x}.sock", unique_id())),
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),

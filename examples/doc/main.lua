@@ -18,7 +18,7 @@ local function ensure_seeded()
 end
 
 -- /user/<name> — fetch a single user document by key
-route.register("/user/{name}", {"lookup", "getattr", "read", "open", "release"}, function(params)
+route.read("/user/{name}", function(params)
     ensure_seeded()
     local val = doc.get(h, params.name)
     if val == nil then
@@ -28,19 +28,19 @@ route.register("/user/{name}", {"lookup", "getattr", "read", "open", "release"},
 end)
 
 -- /all — list all documents
-route.register("/all", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/all", function()
     ensure_seeded()
     return json.enc_pretty(doc.all(h))
 end)
 
 -- /count — number of stored documents
-route.register("/count", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/count", function()
     ensure_seeded()
     return tostring(doc.count(h))
 end)
 
 -- /find/<role> — find documents by json_extract on $.role
-route.register("/find/{role}", {"lookup", "getattr", "read", "open", "release"}, function(params)
+route.read("/find/{role}", function(params)
     ensure_seeded()
     local results = doc.find(h, "$.role", params.role)
     return json.enc_pretty(results)
@@ -55,7 +55,7 @@ local root_meta = {
     {name="find",  path="/find/engineer", desc="GET /find/{role} → find by role"},
 }
 
-route.register("/", {"lookup", "getattr", "readdir", "open", "release"}, function()
+route.readdir("/", function()
     return yaml.enc(root_meta)
 end)
 

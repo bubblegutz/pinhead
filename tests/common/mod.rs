@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -130,14 +131,13 @@ impl PinheadInstance {
         match transport {
             Transport::Ssh(_) => {
                 cmd.env("PINHEAD_SSH_LISTEN", &listen_val);
-                // Also pass PINHEAD_LISTEN so the 9P listener starts on a
-                // harmless address (the script always calls ninep.listen()).
-                cmd.env("PINHEAD_LISTEN", format!("sock:/tmp/pinhead-e2e-ssh-placeholder-{:x}.sock", id));
+                let placeholder = format!("/tmp/pinhead-e2e-ssh-placeholder-{:x}.sock", id);
+                cmd.env("PINHEAD_LISTEN", format!("sock:{}", placeholder));
             }
             Transport::Fuse(_) => {
                 cmd.env("PINHEAD_FUSE_MOUNT", &listen_val);
-                // Also pass PINHEAD_LISTEN placeholder like SSH does
-                cmd.env("PINHEAD_LISTEN", format!("sock:/tmp/pinhead-e2e-fuse-placeholder-{:x}.sock", id));
+                let placeholder = format!("/tmp/pinhead-e2e-fuse-placeholder-{:x}.sock", id);
+                cmd.env("PINHEAD_LISTEN", format!("sock:{}", placeholder));
             }
             _ => {
                 cmd.env("PINHEAD_LISTEN", &listen_val);
@@ -155,9 +155,15 @@ impl PinheadInstance {
             }
             Transport::NinepTcp(_) => Ok(()),
             Transport::NinepUdp(addr) => wait_for_udp(addr),
-            Transport::Ssh(addr) => wait_for_port(addr),
+            Transport::Ssh(addr) => {
+                let placeholder = format!("/tmp/pinhead-e2e-ssh-placeholder-{:x}.sock", id);
+                cleanup.push(placeholder);
+                wait_for_port(addr)
+            }
             Transport::Fuse(path) => {
                 cleanup.push(path.clone());
+                let placeholder = format!("/tmp/pinhead-e2e-fuse-placeholder-{:x}.sock", id);
+                cleanup.push(placeholder);
                 fs::create_dir_all(path).map_err(|e| format!("create mount dir: {e}"))?;
                 wait_for_fuse_mount(path)
             }
@@ -773,11 +779,40 @@ pub fn setup_client_udp(client: &mut UdpNinepClient) -> Result<(), String> {
 
 // ── Scenario runner ─────────────────────────────────────────────────────────
 
+/// Kill any orphaned pinhead processes from previous test runs that
+/// were killed before their Drop handler could run.
+fn cleanup_orphans() {
+    // Stale pinhead processes left by killed test runs block ports/sockets.
+    // Use exact name match (no -f) so we don't kill the test binary
+    // itself (whose full path contains "pinhead" when run via cargo test).
+    for _ in 0..3 {
+        let status = Command::new("pkill")
+            .args(["-9", "pinhead"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            break; // no more to kill
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Clean up all stale temp artifacts (sockets, scripts, db files, mount
+    // dirs) from previous killed runs.
+    let _ = Command::new("sh")
+        .args([
+            "-c",
+            r#"rm -rf /tmp/pinhead-e2e-*.lua /tmp/pinhead-e2e-*.sock /tmp/pinhead-e2e-*.db /tmp/pinhead-e2e-*.db-shm /tmp/pinhead-e2e-*.db-wal 2>/dev/null; find /tmp -maxdepth 1 -name 'pinhead-e2e-*fuse-*' -type d -exec rm -rf {} + 2>/dev/null"#,
+        ])
+        .status();
+}
+
 pub fn run_scenarios(
     script: &str,
     transports: &[Transport],
     test_fn: impl Fn(&mut dyn TestClient),
 ) {
+    cleanup_orphans();
+
     for t in transports {
         eprintln!("[test] transport: {}", t.listen_str());
         let mut inst = match PinheadInstance::start(script, t) {

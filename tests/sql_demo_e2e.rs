@@ -6,7 +6,7 @@ use common::*;
 fn sql_demo() {
     let id = unique_id();
     let db_path = format!("/tmp/pinhead-e2e-sql-db-{:x}.db", id);
-    let script = include_str!("../examples/sql_demo.lua")
+    let script = include_str!("../examples/sql/main.lua")
         .replace(
             "os.getenv(\"PINHEAD_SQL_DB\") or \"/tmp/pinhead-sql-demo.db\"",
             &format!("\"{db_path}\""),

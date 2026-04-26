@@ -7,6 +7,7 @@
 //! json.enc_pretty(value)     -> string
 //! json.dec(string)           -> value
 //! json.q(text, path)         -> value
+//! json.jq(text, filter)      -> value (full jq filter expression)
 //! yaml.enc(value)            -> string
 //! yaml.dec(string)           -> value
 //! yaml.q(text, path)         -> value
@@ -117,6 +118,11 @@ pub fn json_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Val
     json_to_lua(lua, &j)
 }
 
+pub fn json_from_yaml(_lua: &rlua::Lua, text: String) -> Result<String, String> {
+    let j: Json = serde_yaml::from_str(&text).map_err(|e| format!("YAML error: {e}"))?;
+    serde_json::to_string(&j).map_err(|e| e.to_string())
+}
+
 // ── YAML ────────────────────────────────────────────────────────────────────
 
 pub fn yaml_encode(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> {
@@ -126,6 +132,11 @@ pub fn yaml_encode(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> 
 pub fn yaml_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Value<'lua>, String> {
     let j: Json = serde_yaml::from_str(&text).map_err(|e| format!("YAML error: {e}"))?;
     json_to_lua(lua, &j)
+}
+
+pub fn yaml_from_json(_lua: &rlua::Lua, text: String) -> Result<String, String> {
+    let j: Json = serde_json::from_str(&text).map_err(|e| format!("JSON error: {e}"))?;
+    serde_yaml::to_string(&j).map_err(|e| format!("YAML error: {e}"))
 }
 
 // ── TOML ────────────────────────────────────────────────────────────────────
@@ -329,6 +340,62 @@ pub fn json_query<'lua>(
     path: String,
 ) -> Result<rlua::Value<'lua>, String> {
     decode_and_query(lua, text, path, parse_json, "JSON")
+}
+
+/// Run a full jq filter on JSON text.
+///
+/// Uses the `jaq` engine to evaluate arbitrary jq filter expressions.
+/// Returns the result as a Lua value (single output) or an array (multiple outputs).
+pub fn json_jq<'lua>(
+    lua: &'lua rlua::Lua,
+    text: String,
+    filter_str: String,
+) -> Result<rlua::Value<'lua>, String> {
+    use jaq_all::{data, fmts, load, json};
+    use std::fmt::Write as _;
+
+    // 1. Compile the jq filter.
+    let filter = data::compile(&filter_str).map_err(|frs| {
+        let mut msg = String::new();
+        for fr in &frs {
+            write!(msg, "{}", load::FileReportsDisp::new(fr)).unwrap();
+        }
+        format!("jq filter error: {msg}")
+    })?;
+
+    // 2. Parse the JSON input into jaq Val values.
+    let inputs = fmts::read::json::parse_many(text.as_bytes())
+        .map(|r| r.map_err(|e| e.to_string()));
+
+    // 3. Run the filter.
+    let runner = data::Runner::default();
+    let vars = Default::default();
+    let fi = |e: String| e;
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    data::run(&runner, &filter, vars, inputs, fi, |val_result| {
+        let val = val_result.map_err(|e| e.to_string())?;
+        // Write Val to JSON bytes, then parse back as serde_json::Value.
+        let mut buf = Vec::new();
+        json::write::write(&mut buf, &json::write::Pp::default(), 0, &val)
+            .map_err(|e| e.to_string())?;
+        let sv: serde_json::Value =
+            serde_json::from_slice(&buf).map_err(|e| e.to_string())?;
+        results.push(sv);
+        Ok::<_, String>(())
+    })
+    .map_err(|e| e)?;
+
+    // 4. Convert results to Lua value.
+    if results.is_empty() {
+        return Ok(rlua::Value::Nil);
+    }
+    if results.len() == 1 {
+        json_to_lua(lua, &results[0])
+    } else {
+        let arr = serde_json::Value::Array(results);
+        json_to_lua(lua, &arr)
+    }
 }
 
 pub fn yaml_query<'lua>(

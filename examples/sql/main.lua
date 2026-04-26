@@ -20,7 +20,7 @@ local function ensure_initialized()
 end
 
 -- /products — list all products
-route.register("/products", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/products", function()
     ensure_initialized()
     local rows = sql.query(h, "SELECT * FROM products ORDER BY id")
     local out = {}
@@ -32,14 +32,14 @@ route.register("/products", {"lookup", "getattr", "read", "open", "release"}, fu
 end)
 
 -- /products/json — list all products as JSON
-route.register("/products/json", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/products/json", function()
     ensure_initialized()
     local rows = sql.query(h, "SELECT * FROM products ORDER BY id")
     return json.enc_pretty(rows)
 end)
 
 -- /product/<id> — get a single product by id (returns JSON)
-route.register("/product/{id}", {"lookup", "getattr", "read", "open", "release"}, function(params)
+route.read("/product/{id}", function(params)
     ensure_initialized()
     local row = sql.row(h, "SELECT * FROM products WHERE id = ?1", tonumber(params.id))
     if row == nil then
@@ -49,7 +49,7 @@ route.register("/product/{id}", {"lookup", "getattr", "read", "open", "release"}
 end)
 
 -- /low-stock — find products with stock < threshold
-route.register("/low-stock/{max}", {"lookup", "getattr", "read", "open", "release"}, function(params)
+route.read("/low-stock/{max}", function(params)
     ensure_initialized()
     local rows = sql.query(h, "SELECT * FROM products WHERE stock < ?1 ORDER BY stock", tonumber(params.max))
     return json.enc_pretty(rows)
@@ -62,7 +62,7 @@ local root_meta = {
     low_stock     = "GET /low-stock/100  → products with low stock (JSON)",
 }
 
-route.register("/", {"lookup", "getattr", "readdir", "open", "release"}, function()
+route.readdir("/", function()
     return yaml.enc(root_meta)
 end)
 

@@ -25,10 +25,9 @@ async fn test_single_route_lookup() {
     let (handler_tx, mut handler_rx) = mpsc::channel::<HandlerRequest>(16);
     let (frontend_tx, _router_h) = rb.build(handler_tx);
 
-    // Spawn a quick closure handler that echoes back.
     tokio::spawn(async move {
         while let Some(req) = handler_rx.recv().await {
-            let body = format!("{} {} {:?}", req.op.as_str(), req.path, req.params);
+            let body = format!("handler={} params={:?}", req.handler_name, req.params);
             let _ = req
                 .reply
                 .send(Ok(HandlerResponse { data: Bytes::from(body) }));
@@ -48,8 +47,7 @@ async fn test_single_route_lookup() {
 
     let resp = reply_rx.await.unwrap().unwrap();
     let text = String::from_utf8_lossy(&resp.data);
-    assert!(text.contains("lookup"), "response contains op name");
-    assert!(text.contains("/hello"), "response contains path");
+    assert!(text.contains("hello_handler"), "response contains handler name");
 }
 
 /// Test that route params are captured correctly.
@@ -67,7 +65,7 @@ async fn test_route_params() {
 
     tokio::spawn(async move {
         while let Some(req) = handler_rx.recv().await {
-            let body = format!("{} {} {:?}", req.op.as_str(), req.path, req.params);
+            let body = format!("params={:?}", req.params);
             let _ = req
                 .reply
                 .send(Ok(HandlerResponse { data: Bytes::from(body) }));
@@ -105,7 +103,7 @@ async fn test_wildcard_route() {
 
     tokio::spawn(async move {
         while let Some(req) = handler_rx.recv().await {
-            let body = format!("{} {} {:?}", req.op.as_str(), req.path, req.params);
+            let body = format!("params={:?}", req.params);
             let _ = req
                 .reply
                 .send(Ok(HandlerResponse { data: Bytes::from(body) }));
@@ -167,14 +165,13 @@ async fn test_concurrent_requests() {
 
     tokio::spawn(async move {
         while let Some(req) = handler_rx.recv().await {
-            let body = format!("OK {}", req.path);
+            let body = format!("OK {}", req.handler_name);
             let _ = req
                 .reply
                 .send(Ok(HandlerResponse { data: Bytes::from(body) }));
         }
     });
 
-    // Send two requests concurrently.
     let tx = frontend_tx.clone();
     let h1 = tokio::spawn(async move {
         let (rt, rr) = oneshot::channel();
@@ -203,32 +200,6 @@ async fn test_concurrent_requests() {
     });
 
     let (r1, r2) = tokio::join!(h1, h2);
-    assert_eq!(String::from_utf8_lossy(&r1.unwrap().data), "OK /a");
-    assert_eq!(String::from_utf8_lossy(&r2.unwrap().data), "OK /b");
-}
-
-/// Test the request-level convenience helpers.
-#[tokio::test]
-async fn test_request_convenience_methods() {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    let req = pinhead::router::Request {
-        op: FsOperation::StatFs,
-        path: "/".into(),
-        data: Bytes::from("hello"),
-        reply: reply_tx,
-    };
-    req.reply_ok(Bytes::from("ok"));
-    let resp = reply_rx.await.unwrap().unwrap();
-    assert_eq!(&resp.data[..], b"ok");
-
-    let (reply_tx, reply_rx) = oneshot::channel();
-    let req = pinhead::router::Request {
-        op: FsOperation::StatFs,
-        path: "/".into(),
-        data: Bytes::new(),
-        reply: reply_tx,
-    };
-    req.reply_err("nope".into());
-    let err = reply_rx.await.unwrap().unwrap_err();
-    assert_eq!(err, "nope");
+    assert_eq!(String::from_utf8_lossy(&r1.unwrap().data), "OK a");
+    assert_eq!(String::from_utf8_lossy(&r2.unwrap().data), "OK b");
 }

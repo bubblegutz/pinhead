@@ -181,23 +181,23 @@ table.insert(results, 1, summary)
 local result_text = table.concat(results, "\n")
 
 -- Expose results as a virtual file
-route.register("/results", "lookup", function()
+route.lookup("/results", function()
     return "results"
 end)
-route.register("/results", "getattr", function()
+route.getattr("/results", function()
     return "mode=file size=" .. #result_text
 end)
-route.register("/results", "open", function()
+route.open("/results", function()
     return ""
 end)
-route.register("/results", "release", function()
+route.release("/results", function()
     return ""
 end)
-route.register("/results", "read", function()
+route.read("/results", function()
     return result_text
 end)
 
-route.register("/", {"lookup", "getattr", "open", "release"}, function()
+route.all("/", function()
     return ""
 end)
 route.register("/", "readdir", function()

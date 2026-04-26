@@ -1,5 +1,5 @@
 -- simple_http_test.lua — minimal HTTP request to test SSH transport
-route.register("/", {"lookup", "getattr", "read", "open", "release"}, function()
+route.register("/data", {"lookup", "getattr", "read", "open", "release"}, function()
     local ok, res = pcall(req.get, "http://example.com/")
     if not ok then
         return "HTTP Error: " .. tostring(res)

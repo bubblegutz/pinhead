@@ -39,7 +39,9 @@ const TWALK: u8 = 110;
 const RWALK: u8 = 111;
 const TOPEN: u8 = 112;
 const ROPEN: u8 = 113;
+#[expect(dead_code, reason = "9P spec — Create/WStat not yet dispatched")]
 const TCREATE: u8 = 114;
+#[expect(dead_code)]
 const RCREATE: u8 = 115;
 const TREAD: u8 = 116;
 const RREAD: u8 = 117;
@@ -51,7 +53,9 @@ const TREMOVE: u8 = 122;
 const RREMOVE: u8 = 123;
 const TSTAT: u8 = 124;
 const RSTAT: u8 = 125;
+#[expect(dead_code, reason = "9P spec — WStat not yet dispatched")]
 const TWSTAT: u8 = 126;
+#[expect(dead_code)]
 const RWSTAT: u8 = 127;
 
 // ── Qid ───────────────────────────────────────────────────────────────
@@ -924,7 +928,7 @@ async fn handle_udp_message(
 
 async fn run_connection(stream: impl NinepStream, shared: Arc<Shared>) {
     let mut stream = stream;
-    let mut buf = vec![0u8; 65536];
+    let buf = vec![0u8; 65536];
     loop {
         let mut header = [0u8; 7];
         match stream.read_exact(&mut header).await {

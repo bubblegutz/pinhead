@@ -15,7 +15,7 @@ fn fs_mirror() {
     std::fs::write(format!("{root}/subdir/nested.txt"), b"nested content\n")
         .expect("write nested.txt");
 
-    let script = include_str!("../examples/fs_mirror.lua")
+    let script = include_str!("../examples/fs_mirror/main.lua")
         .replace(
             "env.get(\"PINHEAD_MIRROR_ROOT\") or \"/tmp/pinhead-mirror-root\"",
             &format!("\"{root}\""),
@@ -70,7 +70,7 @@ fn fs_mirror_writes() {
         .expect("write hello.txt");
     std::fs::create_dir_all(format!("{root}/subdir")).expect("create subdir");
 
-    let script = include_str!("../examples/fs_mirror.lua")
+    let script = include_str!("../examples/fs_mirror/main.lua")
         .replace(
             "env.get(\"PINHEAD_MIRROR_ROOT\") or \"/tmp/pinhead-mirror-root\"",
             &format!("\"{root}\""),

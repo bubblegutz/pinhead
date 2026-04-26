@@ -6,7 +6,7 @@ use common::*;
 fn doc_demo() {
     let id = unique_id();
     let db_path = format!("/tmp/pinhead-e2e-doc-db-{:x}.db", id);
-    let script = include_str!("../examples/doc_demo.lua")
+    let script = include_str!("../examples/doc/main.lua")
         .replace(
             "os.getenv(\"PINHEAD_DOC_DB\") or \"/tmp/pinhead-doc-demo.db\"",
             &format!("\"{db_path}\""),

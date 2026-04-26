@@ -3,23 +3,28 @@ mod common;
 use common::*;
 
 #[test]
-fn test_basic() {
-    let script = include_str!("../examples/basic/main.lua");
+fn convert_demo() {
+    let script = include_str!("../examples/conversion/main.lua");
     let transports = [
-        Transport::NinepSock(format!("/tmp/pinhead-e2e-basic-sock-{:x}.sock", unique_id())),
+        Transport::NinepSock(format!(
+            "/tmp/pinhead-e2e-convert-sock-{:x}.sock",
+            unique_id()
+        )),
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),
         Transport::NinepUdp(format!("127.0.0.1:{}", find_free_port())),
         Transport::Ssh(format!("127.0.0.1:{}", find_free_port())),
-        Transport::Fuse(format!("/tmp/pinhead-e2e-basic-fuse-{:x}", unique_id())),
+        Transport::Fuse(format!(
+            "/tmp/pinhead-e2e-convert-fuse-{:x}",
+            unique_id()
+        )),
     ];
 
     run_scenarios(script, &transports, |client| {
-        // Walk → open → read → verify content on testfile.txt
-        let text = client.read_file("testfile.txt")
-            .expect("read testfile.txt");
-        assert_eq!(
-            text, "hello from pinhead test!",
-            "read testfile.txt: got {text:?}"
+        // Read /help — usage documentation
+        let text = client.read_file("help").expect("read /help");
+        assert!(
+            text.contains("JSON/YAML Conversion"),
+            "should have help header, got: {text}"
         );
 
         // Walk nonexistent path should fail

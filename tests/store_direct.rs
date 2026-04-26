@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 /// Test that blocking_send/blocking_recv work from within the tokio runtime.
 #[tokio::test(flavor = "current_thread")]
 async fn test_blocking_send_recv_in_runtime() {

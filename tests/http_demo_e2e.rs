@@ -4,7 +4,7 @@ use common::*;
 
 #[test]
 fn http_demo() {
-    let script = include_str!("../examples/http_demo.lua");
+    let script = include_str!("../examples/http/main.lua");
     let transports = [
         Transport::NinepSock(format!("/tmp/pinhead-e2e-http-sock-{:x}.sock", unique_id())),
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),

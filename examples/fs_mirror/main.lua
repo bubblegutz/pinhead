@@ -26,8 +26,8 @@ local function handle_getattr(params)
     return "mode=file size=" .. st.size
 end
 
-route.register("/{*rest}", "lookup", handle_getattr)
-route.register("/{*rest}", "getattr", handle_getattr)
+route.lookup("/{*rest}", handle_getattr)
+route.getattr("/{*rest}", handle_getattr)
 
 -- readdir: list the real directory.
 route.register("/{*rest}", "readdir", function(params)
@@ -151,8 +151,8 @@ route.register("/{*rest}", "setattr", function(params, data)
 end)
 
 -- open / release: no-op.
-route.register("/{*rest}", "open", function() return "" end)
-route.register("/{*rest}", "release", function() return "" end)
+route.open("/{*rest}", function() return "" end)
+route.release("/{*rest}", function() return "" end)
 route.register("/{*rest}", "opendir", function() return "" end)
 route.register("/{*rest}", "releasedir", function() return "" end)
 route.register("/{*rest}", "flush", function() return "" end)

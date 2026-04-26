@@ -8,16 +8,12 @@ use tokio::sync::oneshot;
 use crate::serialize;
 use crate::store;
 
-use crate::fsop::FsOperation;
-
 // ---------------------------------------------------------------------------
 // Handler request / response
 // ---------------------------------------------------------------------------
 
 /// A request sent from the router to a handler task.
 pub struct HandlerRequest {
-    pub op: FsOperation,
-    pub path: String,
     pub params: HashMap<String, String>,
     pub data: Bytes,
     /// Name of the registered Lua function that should handle this request.
@@ -173,6 +169,49 @@ impl HandlerRuntime {
                 .set("route", route_table)
                 .map_err(|e| format!("{e}"))?;
         }
+
+        // ── Route convenience wrappers ────────────────────────────────────
+        // These expand route.register() into shortcut functions like route.read(), route.write(), etc.
+        // Must run after the `route` table is set up but before the user script executes.
+        lua.load(r#"
+do
+    function route.read(path, func)
+        route.register(path, {"lookup", "getattr", "open", "read", "release", "flush"}, func)
+    end
+    function route.write(path, func)
+        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+    end
+    function route.readdir(path, func)
+        route.register(path, {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end
+    function route.create(path, func)
+        route.register(path, {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
+    end
+    function route.unlink(path, func)
+        route.register(path, {"unlink", "lookup", "getattr"}, func)
+    end
+    function route.lookup(path, func)
+        route.register(path, "lookup", func)
+    end
+    function route.getattr(path, func)
+        route.register(path, "getattr", func)
+    end
+    function route.open(path, func)
+        route.register(path, "open", func)
+    end
+    function route.release(path, func)
+        route.register(path, "release", func)
+    end
+    function route.mkdir(path, func)
+        route.register(path, {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end
+    function route.all(path, func)
+        route.register(path, true, func)
+    end
+end
+"#)
+            .exec()
+            .map_err(|e| format!("route wrappers error: {e}"))?;
 
         // ── Build the `fuse` table ────────────────────────────────────────
         {
@@ -393,6 +432,28 @@ impl HandlerRuntime {
                 .map_err(|e| format!("{e}"))?;
             t.set("q", fn_).map_err(|e| format!("{e}"))?;
 
+            // json.jq(text, filter) — run a jq filter on JSON text
+            {
+                let fn_ = lua
+                    .create_function(|lua, (text, filter): (String, String)| {
+                        serialize::json_jq(lua, text, filter)
+                            .map_err(rlua::Error::RuntimeError)
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                t.set("jq", fn_).map_err(|e| format!("{e}"))?;
+            }
+
+            // json.from_yaml(text) → JSON string, converting YAML to JSON
+            {
+                let fn_ = lua
+                    .create_function(|lua, text: String| {
+                        crate::serialize::json_from_yaml(lua, text)
+                            .map_err(rlua::Error::RuntimeError)
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                t.set("from_yaml", fn_).map_err(|e| format!("{e}"))?;
+            }
+
             lua.globals().set("json", t).map_err(|e| format!("{e}"))?;
         }
 
@@ -420,6 +481,17 @@ impl HandlerRuntime {
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+            // yaml.from_json(text) → YAML string, converting JSON to YAML
+            {
+                let fn_ = lua
+                    .create_function(|lua, text: String| {
+                        crate::serialize::yaml_from_json(lua, text)
+                            .map_err(rlua::Error::RuntimeError)
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                t.set("from_json", fn_).map_err(|e| format!("{e}"))?;
+            }
 
             lua.globals().set("yaml", t).map_err(|e| format!("{e}"))?;
         }
@@ -480,6 +552,33 @@ impl HandlerRuntime {
             lua.globals().set("csv", t).map_err(|e| format!("{e}"))?;
         }
 
+        // ── Build the `log` table ──────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            // log.print(msg) — print to stderr with prefix
+            let fn_ = lua
+                .create_function(|_, msg: String| {
+                    eprintln!("[log.print] {msg}");
+                    Ok(())
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("print", fn_).map_err(|e| format!("{e}"))?;
+
+            // log.debug(msg) — print to stderr with prefix
+            let fn_ = lua
+                .create_function(|_, msg: String| {
+                    eprintln!("[log.debug] {msg}");
+                    Ok(())
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("debug", fn_).map_err(|e| format!("{e}"))?;
+
+            lua.globals()
+                .set("log", t)
+                .map_err(|e| format!("{e}"))?;
+        }
+
         // ── Build the `req` table ──────────────────────────────────────────
         {
             let t = lua.create_table().map_err(|e| format!("{e}"))?;
@@ -499,6 +598,75 @@ impl HandlerRuntime {
             lua.globals().set("req", t).map_err(|e| format!("{e}"))?;
         }
 
+        // ── Build the `oauth` table ────────────────────────────────────────
+        {
+            let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            // oauth.client(config) — returns a client table with method stubs
+            let fn_ = lua
+                .create_function(|lua, _config: rlua::Table| {
+                    let client = lua.create_table()?;
+
+                    let df = lua
+                        .create_function(|_, scope: String| {
+                            let _ = scope;
+                            Ok(
+                                "Simulated device_flow_start. Requires real OAuth provider."
+                                    .to_string(),
+                            )
+                        })?;
+                    client.set("device_flow_start", df)?;
+
+                    let dp = lua
+                        .create_function(|_, (code, interval, max): (String, i64, i64)| {
+                            let _ = (code, interval, max);
+                            Ok(
+                                "Simulated device_poll. Requires real OAuth provider."
+                                    .to_string(),
+                            )
+                        })?;
+                    client.set("device_poll", dp)?;
+
+                    let ac = lua
+                        .create_function(
+                            |_, (endpoint, scope, state): (String, String, String)| {
+                                let _ = (endpoint, scope, state);
+                                Ok(
+                                    "https://example.com/oauth/authorize?client_id=YOUR_CLIENT_ID&scope=..."
+                                        .to_string(),
+                                )
+                            },
+                        )?;
+                    client.set("auth_code_url", ac)?;
+
+                    let ec = lua
+                        .create_function(
+                            |_, (code, redirect, secret): (String, String, String)| {
+                                let _ = (code, redirect, secret);
+                                Ok(
+                                    "Simulated exchange_code. Requires real OAuth provider."
+                                        .to_string(),
+                                )
+                            },
+                        )?;
+                    client.set("exchange_code", ec)?;
+
+                    let at = lua
+                        .create_function(|_, (_http_client, _token): (rlua::Table, String)| {
+                            Ok(true)
+                        })?;
+                    client.set("attach_to", at)?;
+
+                    Ok(rlua::Value::Table(client))
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("client", fn_).map_err(|e| format!("{e}"))?;
+
+            lua.globals()
+                .set("oauth", t)
+                .map_err(|e| format!("{e}"))?;
+        }
+
         // ── Build the `doc` and `sql` tables ──────────────────────────────
         store::register_lua_apis(&lua).map_err(|e| format!("store API: {e}"))?;
 
@@ -508,7 +676,7 @@ impl HandlerRuntime {
         // ── Build the `fs` table ──────────────────────────────────────────
         crate::fs::register_lua_apis(&lua).map_err(|e| format!("fs API: {e}"))?;
 
-        // Execute the script.
+        // Execute the user script.
         lua.load(script)
             .exec()
             .map_err(|e| format!("Lua script error: {e}"))?;

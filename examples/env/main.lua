@@ -37,23 +37,23 @@ env.set("PINHEAD_MESSAGE", "hello from env!")
 -- ── Routes ────────────────────────────────────────────────────────
 
 -- Route that reads back the custom env var we set at config time
-route.register("/message", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/message", function()
     return env.get("PINHEAD_MESSAGE") or "not set"
 end)
 
 -- Route that reads the HOME env var (inherited from the parent process)
-route.register("/home", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/home", function()
     return env.get("HOME") or "no home"
 end)
 
 -- Route that sets an env var and reads it back in the same call
-route.register("/ping", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/ping", function()
     env.set("PINHEAD_PONG", "pong")
     return env.get("PINHEAD_PONG")
 end)
 
 -- Route that unsets an env var
-route.register("/nuke", {"lookup", "getattr", "read", "open", "release"}, function()
+route.read("/nuke", function()
     env.set("PINHEAD_NUKE", "boom")
     env.unset("PINHEAD_NUKE")
     local val = env.get("PINHEAD_NUKE")

@@ -20,6 +20,7 @@ ureq = "3"
 rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
 russh-sftp = "2.1.1"
 russh = { path = "vendor/russh", features = ["ring"] }
+jaq-all = "0.1"
 
 [dev-dependencies]
 ssh2 = "0.9"

@@ -4,7 +4,7 @@ use common::*;
 
 #[test]
 fn env_demo() {
-    let script = include_str!("../examples/env_demo.lua");
+    let script = include_str!("../examples/env/main.lua");
     let transports = [
         Transport::NinepSock(format!("/tmp/pinhead-e2e-env-sock-{:x}.sock", unique_id())),
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),

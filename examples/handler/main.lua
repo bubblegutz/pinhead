@@ -28,6 +28,7 @@ local users = {
 }
 for _, pair in ipairs(users) do
     sshfs.userpasswd(pair[1], pair[2])
+    log.debug("added user: " .. pair[1])
 end
 -- Alternatively, for a single global password (any username accepted):
 -- sshfs.password("hunter2")
@@ -37,8 +38,10 @@ end
 -- Listeners — override via PINHEAD_LISTEN / PINHEAD_SSH_LISTEN env vars for e2e tests.
 local listen_addr = env.get("PINHEAD_LISTEN") or "sock:/tmp/pinhead.sock"
 ninep.listen(listen_addr)
+log.print("9P listener on " .. listen_addr)
 local ssh_listen = env.get("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
 sshfs.listen(ssh_listen)
+log.print("SSH listener on " .. ssh_listen)
 
 -- FUSE mount — activated via PINHEAD_FUSE_MOUNT env var for e2e tests.
 local fuse_mount = env.get("PINHEAD_FUSE_MOUNT")
@@ -48,42 +51,42 @@ end
 
 -- Route registrations -------------------------------------------------------
 
-route.register("/", {"lookup", "getattr", "readdir", "open", "release"}, function(params, data)
+route.readdir("/", function(_params, _data)
     return "root directory"
 end)
 
-route.register("/", "getattr", function(params, data)
+route.getattr("/", function(_params, _data)
     return 'mode=directory size=4096'
 end)
 
-route.register("/users/{id}/profile", "lookup", function(params, data)
+route.lookup("/users/{id}/profile", function(params, _data)
     local id = params["id"]
     return "profile for user " .. id
 end)
 
-route.register("/users/{id}/profile", "open", function(params, data)
+route.open("/users/{id}/profile", function(_params, _data)
     return ""
 end)
 
-route.register("/users/{id}/profile", "read", function(params, data)
+route.read("/users/{id}/profile", function(params, _data)
     local id = params["id"]
     return '{"user":"' .. id .. '","name":"User ' .. id .. '","email":"user' .. id .. '@example.com"}'
 end)
 
-route.register("/users/{id}/profile", "getattr", function(params, data)
+route.getattr("/users/{id}/profile", function(_params, _data)
     return 'mode=file size=128'
 end)
 
-route.register("/files/{path}", "read", function(params, data)
+route.read("/files/{path}", function(params, _data)
     local path = params["path"]
     return "contents of " .. path
 end)
 
-route.register("/files/{path}", "lookup", function(params, data)
+route.lookup("/files/{path}", function(params, _data)
     return "file: " .. params["path"]
 end)
 
-route.register("/files/{path}", "getattr", function(params, data)
+route.getattr("/files/{path}", function(_params, _data)
     return 'mode=file size=64'
 end)
 

@@ -41,7 +41,10 @@ debug
 .supermaven/
 .tabby/
 .windsurfrules
+AGENTS/
 AGENTS.md
 CLAUDE.md
 CONTEXT.md
 claude.md
+DECISIONS.md
+TODO.md

@@ -32,18 +32,6 @@ pub struct Request {
     pub reply: oneshot::Sender<Result<Response, String>>,
 }
 
-impl Request {
-    /// Convenience: send a success response.
-    pub fn reply_ok(self, data: Bytes) {
-        let _ = self.reply.send(Ok(Response { data }));
-    }
-
-    /// Convenience: send an error response.
-    pub fn reply_err(self, msg: String) {
-        let _ = self.reply.send(Err(msg));
-    }
-}
-
 /// A response sent from the router back to the frontend.
 pub type Response = crate::handler::HandlerResponse;
 
@@ -184,8 +172,6 @@ async fn dispatch(
     let (reply_tx, reply_rx) = oneshot::channel();
 
     let hreq = HandlerRequest {
-        op,
-        path: path.to_string(),
         params,
         data,
         handler_name,

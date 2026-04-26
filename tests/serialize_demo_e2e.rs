@@ -4,7 +4,7 @@ use common::*;
 
 #[test]
 fn serialize_demo() {
-    let script = include_str!("../examples/serialize_demo.lua");
+    let script = include_str!("../examples/serialization/main.lua");
     let transports = [
         Transport::NinepSock(format!("/tmp/pinhead-e2e-serialize-sock-{:x}.sock", unique_id())),
         Transport::NinepTcp(format!("127.0.0.1:{}", find_free_port())),
@@ -43,5 +43,25 @@ fn serialize_demo() {
             err.contains("lookup failed") || err.contains("no route") || !err.is_empty(),
             "walk nonexistent should give route error, got: {err}"
         );
+
+        // jq: /jq_title — query `.title` returns "The Name of the Wind"
+        let jq_title = client.read_file("jq_title").expect("read jq_title");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&jq_title).expect("jq_title should be valid JSON");
+        assert_eq!(parsed, "The Name of the Wind");
+
+        // jq: /jq_tags — query `.tags[]` unpacks array
+        let jq_tags = client.read_file("jq_tags").expect("read jq_tags");
+        let parsed_tags: serde_json::Value =
+            serde_json::from_str(&jq_tags).expect("jq_tags should be valid JSON");
+        assert_eq!(parsed_tags, serde_json::json!(["fantasy", "fiction"]));
+
+        // jq: /jq_filtered — query `.[] | select(.age > 30)` filters people
+        let jq_filtered = client.read_file("jq_filtered").expect("read jq_filtered");
+        let parsed_filtered: serde_json::Value =
+            serde_json::from_str(&jq_filtered).expect("jq_filtered should be valid JSON");
+        // Only Carol (age 35) matches, returned as single object
+        assert_eq!(parsed_filtered["name"], "Carol");
+        assert_eq!(parsed_filtered["age"], 35);
     });
 }

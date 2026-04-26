@@ -182,7 +182,7 @@ impl DbRegistry {
 
 fn run_writer_conn(
     conn: rusqlite::Connection,
-    mut rx: mpsc::Receiver<WriteRequest>,
+    rx: mpsc::Receiver<WriteRequest>,
 ) {
     loop {
         match rx.recv() {
@@ -205,7 +205,7 @@ fn run_writer_conn(
 
 fn run_reader_conn(
     conn: rusqlite::Connection,
-    mut rx: mpsc::Receiver<ReadRequest>,
+    rx: mpsc::Receiver<ReadRequest>,
 ) {
     loop {
         match rx.recv() {
