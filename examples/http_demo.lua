@@ -6,94 +6,77 @@
 
 route.register("/", {"lookup", "getattr", "readdir", "open", "release"}, function()
     local meta = {
-        post        = "GET /post         → fetches a blog post from JSONPlaceholder",
-        http_params = "GET /http_params  → HTTP request diagnostics (headers, query, errors)",
+        page   = "GET /page    → fetches a Wikipedia page summary",
+        search = "GET /search  → Wikipedia opensearch with query params",
     }
     return yaml.enc(meta)
 end)
 
--- Fetch a blog post from JSONPlaceholder with automatic JSON decoding.
--- The `decode = "json"` option parses the response body into a Lua table,
--- so we access fields directly via res.body.
-route.register("/post", {"lookup", "getattr", "read", "open", "release"}, function()
-    local ok, res = pcall(req.get, "https://jsonplaceholder.typicode.com/posts/1", {decode = "json"})
+-- Fetch a Wikipedia page summary with automatic JSON decoding.
+route.register("/page", {"lookup", "getattr", "read", "open", "release"}, function()
+    local ok, res = pcall(req.get,
+        "https://en.wikipedia.org/api/rest_v1/page/summary/Rust_(programming_language)",
+        {decode = "json"})
     if not ok then
         return "HTTP Error: " .. tostring(res)
     end
 
     local data = res.body
     return string.format([[
-Post #%d
-=======
+Page: %s
+======
 Title: %s
-Author (userId): %d
-
-%s
-]], data.id, data.title, data.userId, data.body)
+Description: %s
+Extract: %s
+]], data.title or "unknown", data.title or "unknown",
+   data.description or "unknown", data.extract or "unknown")
 end)
 
--- Make an HTTP request with custom headers and query params,
--- then format the full request/response diagnostics as a text file.
---
--- Demonstrates:
---   - Setting request headers
---   - Passing query parameters
---   - Built-in JSON decoding (no manual json.dec)
---   - Iterating response tables
---   - Graceful error handling with pcall
-route.register("/http_params", {"lookup", "getattr", "read", "open", "release"}, function()
+-- Query Wikipedia's opensearch API with custom headers and query params,
+-- demonstrating req.get with options and graceful pcall error handling.
+route.register("/search", {"lookup", "getattr", "read", "open", "release"}, function()
     local opts = {
-        headers = {["X-Demo"] = "pinhead", ["Accept"] = "application/json"},
-        query = {name = "Alice", role = "engineer", active = "true"},
+        headers = {["User-Agent"] = "pinhead/0.1"},
+        query = {action = "opensearch", search = "Rust", format = "json", limit = "2"},
         decode = "json",
     }
-    local ok, res = pcall(req.get, "https://httpbin.org/get", opts)
+    local ok, res = pcall(req.get, "https://en.wikipedia.org/w/api.php", opts)
     if not ok then
         return string.format([[
-HTTP Request Diagnostics
-========================
+Search Error
+============
 
 Request Failed: %s
-
-Requested Headers:
-  X-Demo: pinhead
-  Accept: application/json
-
-Requested Query Parameters:
-  name: Alice
-  role: engineer
-  active: true
 ]], tostring(res))
     end
 
     local data = res.body
     local lines = {}
-    table.insert(lines, "HTTP Request Diagnostics")
-    table.insert(lines, "========================")
+    table.insert(lines, "Search Results")
+    table.insert(lines, "==============")
     table.insert(lines, "")
     table.insert(lines, "Response Status: " .. tostring(res.status))
     table.insert(lines, "Success (ok): " .. tostring(res.ok))
-    table.insert(lines, "Origin: " .. (data.origin or "unknown"))
-    table.insert(lines, "URL: " .. (data.url or "unknown"))
-    table.insert(lines, "Content-Type: " .. (res.headers["Content-Type"] or "unknown"))
     table.insert(lines, "")
-
-    table.insert(lines, "Sent Headers:")
-    if data.headers then
-        for k, v in pairs(data.headers) do
-            table.insert(lines, "  " .. k .. ": " .. tostring(v))
-        end
-    end
-    table.insert(lines, "")
-
-    table.insert(lines, "Sent Query Parameters:")
-    if data.args then
-        for k, v in pairs(data.args) do
-            table.insert(lines, "  " .. k .. " = " .. tostring(v))
+    if type(data) == "table" and type(data[2]) == "table" then
+        for _, v in ipairs(data[2]) do
+            table.insert(lines, "  - " .. tostring(v))
         end
     end
 
     return table.concat(lines, "\n")
 end)
 
-ninep.listen("sock:/tmp/pinhead-http-demo.sock")
+-- User credentials for SSH auth.
+local users = {
+    {"alice", "hunter2"},
+    {"bob", "letmein"},
+}
+for _, pair in ipairs(users) do
+    sshfs.userpasswd(pair[1], pair[2])
+end
+
+local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead-http-demo.sock"
+ninep.listen(listen_addr)
+local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+sshfs.listen(ssh_listen)

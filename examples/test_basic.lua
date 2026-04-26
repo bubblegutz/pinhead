@@ -31,5 +31,17 @@ route.default(function(params, data)
     return "unmatched"
 end)
 
--- Listeners — all sockets come from here, not from Rust.
-ninep.listen("sock:/tmp/pinhead-test-basic.sock")
+-- User credentials for SSH auth.
+local users = {
+    {"alice", "hunter2"},
+    {"bob", "letmein"},
+}
+for _, pair in ipairs(users) do
+    sshfs.userpasswd(pair[1], pair[2])
+end
+
+-- Listeners — override via PINHEAD_LISTEN / PINHEAD_SSH_LISTEN env vars for e2e tests.
+local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead-test-basic.sock"
+ninep.listen(listen_addr)
+local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+sshfs.listen(ssh_listen)

@@ -34,9 +34,11 @@ end
 -- Or use ed25519 public key auth:
 -- sshfs.authorized_keys("/home/alice/.ssh/authorized_keys")
 
--- Listeners — all sockets come from here, not from Rust.
-ninep.listen("sock:/tmp/pinhead.sock")
-sshfs.listen("127.0.0.1:2222")
+-- Listeners — override via PINHEAD_LISTEN / PINHEAD_SSH_LISTEN env vars for e2e tests.
+local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead.sock"
+ninep.listen(listen_addr)
+local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+sshfs.listen(ssh_listen)
 
 -- Route registrations -------------------------------------------------------
 
@@ -51,6 +53,10 @@ end)
 route.register("/users/{id}/profile", "lookup", function(params, data)
     local id = params["id"]
     return "profile for user " .. id
+end)
+
+route.register("/users/{id}/profile", "open", function(params, data)
+    return ""
 end)
 
 route.register("/users/{id}/profile", "read", function(params, data)

@@ -7,7 +7,19 @@
 -- env.set("KEY", v)
 -- env.unset("KEY")
 
-ninep.listen("sock:/tmp/pinhead-env-demo.sock")
+-- User credentials for SSH auth.
+local users = {
+    {"alice", "hunter2"},
+    {"bob", "letmein"},
+}
+for _, pair in ipairs(users) do
+    sshfs.userpasswd(pair[1], pair[2])
+end
+
+local listen_addr = os.getenv("PINHEAD_LISTEN") or "sock:/tmp/pinhead-env-demo.sock"
+ninep.listen(listen_addr)
+local ssh_listen = os.getenv("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
+sshfs.listen(ssh_listen)
 
 -- Read an existing env var at config time
 local path = env.get("PATH")

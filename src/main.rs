@@ -17,7 +17,7 @@ use tokio::task::LocalSet;
 use handler::HandlerRequest;
 use router::RouteMeta;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     // ── 1. Load Lua script ──────────────────────────────────────────────
     let script = load_script();

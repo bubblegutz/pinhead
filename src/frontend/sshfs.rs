@@ -1,328 +1,29 @@
-//! Minimal SSH/SFTP server frontend backed by the pinhead path router.
+//! SSH/SFTP frontend backed by the [`russh`] SSH-2.0 implementation and
+//! [`russh_sftp`] protocol handler.
 //!
-//! Implements a minimal SSH-2.0 server with curve25519-sha256 key exchange,
-//! aes256-ctr encryption, hmac-sha256 MAC, and password + ed25519 public key
-//! authentication.  The only subsystem supported is SFTP (version 3), which
-//! maps 1:1 to pinhead FsOperation requests.
-//!
-//! This is a from-scratch implementation using only basic crypto crates:
-//! aes, ctr, sha2, ed25519-dalek, x25519-dalek.
+//! Supports password and ed25519 public-key authentication.  Only the SFTP
+//! subsystem is provided; each SFTP operation maps to a pinhead
+//! `FsOperation` request forwarded through the path router.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use aes::cipher::{KeyIvInit, StreamCipher};
 use bytes::Bytes;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use sha2::{Digest, Sha256};
+use ed25519_dalek::VerifyingKey;
+use russh::server::{Auth, Config, Handler, Msg, Server, Session};
+use russh::{Channel, ChannelId};
+use russh_sftp::protocol::{
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode, Version,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, Mutex};
-use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey};
-
-use rand_core::{OsRng, RngCore};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 use crate::fsop::FsOperation;
 use crate::router::Request;
-
-// ── SSH constants ───────────────────────────────────────────────────────────
-
-const SSH_MSG_KEXINIT: u8 = 20;
-const SSH_MSG_NEWKEYS: u8 = 21;
-const SSH_MSG_KEX_ECDH_INIT: u8 = 30;
-const SSH_MSG_KEX_ECDH_REPLY: u8 = 31;
-const SSH_MSG_SERVICE_REQUEST: u8 = 5;
-const SSH_MSG_SERVICE_ACCEPT: u8 = 6;
-const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
-const SSH_MSG_USERAUTH_FAILURE: u8 = 51;
-const SSH_MSG_USERAUTH_SUCCESS: u8 = 52;
-const SSH_MSG_USERAUTH_PK_OK: u8 = 60;
-const SSH_MSG_GLOBAL_REQUEST: u8 = 80;
-const SSH_MSG_REQUEST_FAILURE: u8 = 82;
-const SSH_MSG_CHANNEL_OPEN: u8 = 90;
-const SSH_MSG_CHANNEL_OPEN_CONFIRMATION: u8 = 91;
-const SSH_MSG_CHANNEL_OPEN_FAILURE: u8 = 92;
-const SSH_MSG_CHANNEL_WINDOW_ADJUST: u8 = 93;
-const SSH_MSG_CHANNEL_DATA: u8 = 94;
-const SSH_MSG_CHANNEL_EOF: u8 = 96;
-const SSH_MSG_CHANNEL_CLOSE: u8 = 97;
-const SSH_MSG_CHANNEL_REQUEST: u8 = 98;
-const SSH_MSG_CHANNEL_SUCCESS: u8 = 99;
-const SSH_MSG_CHANNEL_FAILURE: u8 = 100;
-
-// SFTP constants
-const SSH_FXP_INIT: u8 = 1;
-const SSH_FXP_VERSION: u8 = 2;
-const SSH_FXP_OPEN: u8 = 3;
-const SSH_FXP_CLOSE: u8 = 4;
-const SSH_FXP_READ: u8 = 5;
-const SSH_FXP_WRITE: u8 = 6;
-const SSH_FXP_LSTAT: u8 = 7;
-const SSH_FXP_FSTAT: u8 = 8;
-const SSH_FXP_OPENDIR: u8 = 11;
-const SSH_FXP_READDIR: u8 = 12;
-const SSH_FXP_REMOVE: u8 = 13;
-const SSH_FXP_MKDIR: u8 = 14;
-const SSH_FXP_RMDIR: u8 = 15;
-const SSH_FXP_REALPATH: u8 = 16;
-const SSH_FXP_STAT: u8 = 17;
-const SSH_FXP_RENAME: u8 = 18;
-const SSH_FXP_STATUS: u8 = 101;
-const SSH_FXP_HANDLE: u8 = 102;
-const SSH_FXP_DATA: u8 = 103;
-const SSH_FXP_NAME: u8 = 104;
-const SSH_FXP_ATTRS: u8 = 105;
-
-const SFXP_OK: u32 = 0;
-const SFXP_EOF: u32 = 1;
-const SFXP_NO_SUCH_FILE: u32 = 2;
-const SFXP_PERMISSION_DENIED: u32 = 3;
-const SFXP_FAILURE: u32 = 4;
-const SFXP_BAD_MESSAGE: u32 = 5;
-const SFXP_NO_CONNECTION: u32 = 6;
-const SFXP_CONNECTION_LOST: u32 = 7;
-const SFXP_OP_UNSUPPORTED: u32 = 8;
-const SFXP_INVALID_HANDLE: u32 = 9;
-
-const AES_BLOCK: usize = 16;
-
-// ── SSH cipher state ───────────────────────────────────────────────────────
-
-struct CipherState {
-    enc: Option<CtrCipher>,  // encryption (server → client)
-    dec: Option<CtrCipher>,  // decryption (client → server)
-    enc_mac_key: Vec<u8>,
-    dec_mac_key: Vec<u8>,
-    enc_seq: u32,
-    dec_seq: u32,
-    kex_done: bool,
-}
-
-type CtrCipher = ctr::Ctr128LE<aes::Aes256>;
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    const BLOCK: usize = 64;
-    let mut k = key.to_vec();
-    if k.len() > BLOCK {
-        k = Sha256::digest(&k).to_vec();
-    }
-    k.resize(BLOCK, 0);
-    let mut ipad = vec![0x36u8; BLOCK];
-    let mut opad = vec![0x5cu8; BLOCK];
-    for i in 0..k.len() {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
-    }
-    let mut inner = ipad;
-    inner.extend_from_slice(data);
-    let inner_hash = Sha256::digest(&inner);
-    let inner_bytes = inner_hash.to_vec();
-    let mut outer = opad;
-    outer.extend_from_slice(&inner_bytes);
-    Sha256::digest(&outer).to_vec()
-}
-
-/// Compute the key-derivation hash: HASH(K || H || letter || session_id)
-fn compute_key(k: &[u8], h: &[u8], letter: u8, session_id: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(k);
-    buf.extend_from_slice(h);
-    buf.push(letter);
-    buf.extend_from_slice(session_id);
-    Sha256::digest(&buf).to_vec()
-}
-
-// ── SSH packet I/O ─────────────────────────────────────────────────────────
-
-/// Read an SSH binary packet, decrypting and verifying MAC.
-async fn read_packet(
-    stream: &mut (impl AsyncReadExt + Unpin),
-    cipher: &mut CipherState,
-) -> Result<Vec<u8>, String> {
-    if !cipher.kex_done {
-        // Plaintext: uint32 length, byte padding, payload, padding
-        let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| format!("read error: {e}"))?;
-        let packet_len = u32::from_be_bytes(len_buf) as usize;
-        let mut rest = vec![0u8; packet_len];
-        stream
-            .read_exact(&mut rest)
-            .await
-            .map_err(|e| format!("read error: {e}"))?;
-        let padding_len = rest[0] as usize;
-        let payload = rest[1..packet_len - padding_len].to_vec();
-        Ok(payload)
-    } else {
-        // Encrypted: read 4 encrypted bytes for length
-        let mut len_enc = [0u8; 4];
-        stream
-            .read_exact(&mut len_enc)
-            .await
-            .map_err(|e| format!("read error: {e}"))?;
-        if let Some(ref mut dec) = cipher.dec {
-            dec.apply_keystream(&mut len_enc);
-        }
-        let packet_len = u32::from_be_bytes(len_enc) as usize;
-
-        let mac_len = 32; // HMAC-SHA256
-        let block_len = packet_len + mac_len;
-        let mut block = vec![0u8; block_len];
-        stream
-            .read_exact(&mut block)
-            .await
-            .map_err(|e| format!("read error: {e}"))?;
-
-        let (enc_data, mac_rcvd) = block.split_at_mut(packet_len);
-
-        // Verify MAC
-        let seq_bytes = cipher.dec_seq.to_be_bytes();
-        let mut mac_data = seq_bytes.to_vec();
-        mac_data.extend_from_slice(&len_enc);
-        mac_data.extend_from_slice(enc_data);
-        let mac_expected = hmac_sha256(&cipher.dec_mac_key, &mac_data);
-        if mac_expected != mac_rcvd {
-            return Err("MAC mismatch".to_string());
-        }
-
-        // Decrypt
-        if let Some(ref mut dec) = cipher.dec {
-            dec.apply_keystream(enc_data);
-        }
-
-        cipher.dec_seq += 1;
-
-        let padding_len = enc_data[0] as usize;
-        let payload = enc_data[1..packet_len - padding_len].to_vec();
-        Ok(payload)
-    }
-}
-
-/// Write an SSH binary packet, encrypting and adding MAC.
-async fn write_packet(
-    stream: &mut (impl AsyncWriteExt + Unpin),
-    payload: &[u8],
-    cipher: &mut CipherState,
-) -> Result<(), String> {
-    // Compute padding to reach a multiple of AES_BLOCK
-    let pad_len = if !cipher.kex_done {
-        let min_pad = 4;
-        let total = 1 + payload.len() + min_pad;
-        let rem = total % AES_BLOCK;
-        if rem == 0 {
-            min_pad
-        } else {
-            AES_BLOCK - rem + min_pad - 1
-        }
-    } else {
-        let min_pad = 4;
-        let total = 1 + payload.len() + min_pad;
-        let rem = total % AES_BLOCK;
-        if rem == 0 { min_pad } else { AES_BLOCK - rem + min_pad - 1 }
-    };
-
-    let packet_len = 1 + payload.len() + pad_len;
-    let mut plain = Vec::with_capacity(4 + packet_len);
-
-    // packet_length (4 bytes, big-endian)
-    plain.extend_from_slice(&(packet_len as u32).to_be_bytes());
-
-    // padding_length (1 byte)
-    plain.push(pad_len as u8);
-
-    // payload
-    plain.extend_from_slice(payload);
-
-    // padding (zeros — simplified; real impl uses random)
-    plain.extend(std::iter::repeat(0u8).take(pad_len));
-
-    let seq = cipher.enc_seq;
-
-    if !cipher.kex_done {
-        // Plaintext write
-        stream
-            .write_all(&plain)
-            .await
-            .map_err(|e| format!("write error: {e}"))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| format!("flush error: {e}"))?;
-    } else {
-        // Encrypt: first 4 bytes (length) + rest
-        if let Some(ref mut enc) = cipher.enc {
-            enc.apply_keystream(&mut plain[..4]); // encrypt length
-            enc.apply_keystream(&mut plain[4..]); // encrypt rest
-        }
-
-        // Compute MAC: seq || encrypted_packet
-        let seq_bytes = seq.to_be_bytes();
-        let mut mac_data = seq_bytes.to_vec();
-        mac_data.extend_from_slice(&plain);
-        let mac = hmac_sha256(&cipher.enc_mac_key, &mac_data);
-
-        stream
-            .write_all(&plain)
-            .await
-            .map_err(|e| format!("write error: {e}"))?;
-        stream
-            .write_all(&mac)
-            .await
-            .map_err(|e| format!("write error: {e}"))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| format!("flush error: {e}"))?;
-    }
-
-    cipher.enc_seq += 1;
-    Ok(())
-}
-
-// ── SSH string/blob helpers ────────────────────────────────────────────────
-
-fn ssh_string(buf: &mut Vec<u8>, s: &[u8]) {
-    buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
-    buf.extend_from_slice(s);
-}
-
-fn ssh_uint32(buf: &mut Vec<u8>, v: u32) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-fn read_ssh_string(data: &[u8], off: &mut usize) -> Result<Vec<u8>, String> {
-    if *off + 4 > data.len() {
-        return Err("short string header".to_string());
-    }
-    let len = u32::from_be_bytes(data[*off..*off + 4].try_into().unwrap()) as usize;
-    *off += 4;
-    if *off + len > data.len() {
-        return Err("short string data".to_string());
-    }
-    let val = data[*off..*off + len].to_vec();
-    *off += len;
-    Ok(val)
-}
-
-fn read_u32(data: &[u8], off: &mut usize) -> Result<u32, String> {
-    if *off + 4 > data.len() {
-        return Err("short u32".to_string());
-    }
-    let v = u32::from_be_bytes(data[*off..*off + 4].try_into().unwrap());
-    *off += 4;
-    Ok(v)
-}
-
-fn read_u8(data: &[u8], off: &mut usize) -> Result<u8, String> {
-    if *off >= data.len() {
-        return Err("short u8".to_string());
-    }
-    let v = data[*off];
-    *off += 1;
-    Ok(v)
-}
 
 // ── SFTP handle manager ────────────────────────────────────────────────────
 
@@ -367,811 +68,366 @@ impl HandleState {
     }
 }
 
-// ── SSH session state ──────────────────────────────────────────────────────
+// ── Error types ────────────────────────────────────────────────────────────
 
-struct SshSession {
+/// Error type for the SSH-level handler.
+#[derive(Debug)]
+struct SshError(String);
+
+impl std::fmt::Display for SshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SshError {}
+
+impl From<russh::Error> for SshError {
+    fn from(e: russh::Error) -> Self {
+        SshError(e.to_string())
+    }
+}
+
+impl From<String> for SshError {
+    fn from(s: String) -> Self {
+        SshError(s)
+    }
+}
+
+// ── SSH Server (accepts connections) ───────────────────────────────────────
+
+struct SshServer {
     router_tx: mpsc::Sender<Request>,
-    host_key: SigningKey,
-    host_key_pub: VerifyingKey,
-    handles: Arc<Mutex<HandleState>>,
-    // Auth config
     password: Option<String>,
     authorized_keys: Vec<VerifyingKey>,
     userpasswds: Vec<(String, String)>,
 }
 
+impl Server for SshServer {
+    type Handler = SshSession;
+
+    fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
+        SshSession {
+            router_tx: self.router_tx.clone(),
+            authorized_keys: self.authorized_keys.clone(),
+            password: self.password.clone(),
+            userpasswds: self.userpasswds.clone(),
+            channels: HashMap::new(),
+        }
+    }
+}
+
+// ── SSH Session (per-connection) ───────────────────────────────────────────
+
+struct SshSession {
+    router_tx: mpsc::Sender<Request>,
+    authorized_keys: Vec<VerifyingKey>,
+    password: Option<String>,
+    userpasswds: Vec<(String, String)>,
+    /// Channels awaiting subsystem requests, indexed by ChannelId.
+    channels: HashMap<ChannelId, Channel<Msg>>,
+}
+
+impl Handler for SshSession {
+    type Error = SshError;
+
+    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::reject())
+    }
+
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        let ok = match &self.password {
+            Some(expected) if password == expected => true,
+            _ => self
+                .userpasswds
+                .iter()
+                .any(|(u, p)| u == user && p == password),
+        };
+        let ok = ok || (self.password.is_none() && self.userpasswds.is_empty());
+
+        if ok {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey_offered(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let trusted = self.key_is_trusted(public_key);
+        if trusted || self.authorized_keys.is_empty() {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let trusted = self.key_is_trusted(public_key);
+        if trusted || self.authorized_keys.is_empty() {
+            Ok(Auth::Accept)
+        } else {
+            Ok(Auth::reject())
+        }
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let id = channel.id();
+        self.channels.insert(id, channel);
+        Ok(true) // accept
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if name == "sftp" {
+            session.channel_success(channel)?;
+
+            if let Some(chan) = self.channels.remove(&channel) {
+                let stream = chan.into_stream();
+                let sftp_handler = SftpSession {
+                    router_tx: self.router_tx.clone(),
+                    handles: HandleState::new(),
+                };
+                tokio::spawn(async move {
+                    sftp_loop(stream, sftp_handler).await;
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        _channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let _ = session.close(channel);
+        self.channels.remove(&channel);
+        Ok(())
+    }
+}
+
 impl SshSession {
-    fn new(
-        router_tx: mpsc::Sender<Request>,
-        host_key: SigningKey,
-        password: Option<String>,
-        authorized_keys: Vec<VerifyingKey>,
-        userpasswds: Vec<(String, String)>,
-    ) -> Self {
-        let host_key_pub = host_key.verifying_key();
-        Self {
-            router_tx,
-            host_key,
-            host_key_pub,
-            handles: Arc::new(Mutex::new(HandleState::new())),
-            password,
-            authorized_keys,
-            userpasswds,
-        }
-    }
-
-    /// Run the full SSH handshake + SFTP session on a single TCP connection.
-    async fn run(
-        self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-    ) -> Result<(), String> {
-        let mut cipher = CipherState {
-            enc: None,
-            dec: None,
-            enc_mac_key: Vec::new(),
-            dec_mac_key: Vec::new(),
-            enc_seq: 0,
-            dec_seq: 0,
-            kex_done: false,
+    /// Check whether an `ssh_key::PublicKey` matches any of our trusted keys.
+    fn key_is_trusted(&self, public_key: &russh::keys::PublicKey) -> bool {
+        let ed = match public_key.key_data().ed25519() {
+            Some(k) => k,
+            None => return false,
         };
+        let pub_bytes: &[u8; 32] = ed.as_ref();
+        self.authorized_keys
+            .iter()
+            .any(|vk| vk.to_bytes().as_slice() == pub_bytes.as_slice())
+    }
+}
 
-        // ── 1. Version exchange ────────────────────────────────────────────
-        let server_id = b"SSH-2.0-pinhead_0.1\r\n";
-        // Read client version
-        let mut client_vers = Vec::new();
-        loop {
-            let mut byte = [0u8; 1];
-            stream
-                .read_exact(&mut byte)
-                .await
-                .map_err(|e| format!("read version: {e}"))?;
-            client_vers.push(byte[0]);
-            if client_vers.ends_with(b"\r\n") || client_vers.ends_with(b"\n") {
-                break;
-            }
-        }
-        let client_vers = String::from_utf8_lossy(&client_vers)
-            .trim()
-            .to_string();
-        eprintln!("[sshfs] client version: {client_vers}");
+// ── SFTP Session (per-subsystem) ───────────────────────────────────────────
 
-        stream
-            .write_all(server_id)
+struct SftpSession {
+    router_tx: mpsc::Sender<Request>,
+    handles: HandleState,
+}
+
+impl SftpSession {
+    async fn init(
+        &mut self,
+        _version: u32,
+        _extensions: HashMap<String, String>,
+    ) -> Result<Version, StatusCode> {
+        Ok(Version {
+            version: 3,
+            extensions: HashMap::new(),
+        })
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        _pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, StatusCode> {
+        self.route(FsOperation::Open, &filename, Bytes::new())
             .await
-            .map_err(|e| format!("write version: {e}"))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| format!("flush: {e}"))?;
-
-        let v_c = client_vers.as_bytes().to_vec();
-        let v_s = b"SSH-2.0-pinhead_0.1";
-
-        // ── 2. Key exchange (curve25519-sha256) ────────────────────────────
-        let (_session_id, _kex_h) = self.kex_curve25519(stream, &mut cipher, &v_c, v_s).await?;
-
-        // ── 3. Service request → "ssh-userauth" ────────────────────────────
-        let payload = read_packet(stream, &mut cipher).await?;
-        if payload[0] != SSH_MSG_SERVICE_REQUEST {
-            return Err("expected SERVICE_REQUEST".to_string());
-        }
-        let mut off = 1;
-        let svc = read_ssh_string(&payload, &mut off)?;
-        if svc != b"ssh-userauth" {
-            return Err("expected ssh-userauth service".to_string());
-        }
-        // Accept
-        let mut resp = vec![SSH_MSG_SERVICE_ACCEPT];
-        ssh_string(&mut resp, b"ssh-userauth");
-        write_packet(stream, &resp, &mut cipher).await?;
-
-        // ── 4. User authentication ─────────────────────────────────────────
-        self.do_auth(stream, &mut cipher).await?;
-
-        // ── 5. Channel open + SFTP subsystem ───────────────────────────────
-        self.handle_sftp_session(stream, &mut cipher).await?;
-
-        Ok(())
+            .map_err(|_| StatusCode::Failure)?;
+        let handle = self.handles.alloc(&filename, false);
+        Ok(Handle { id, handle })
     }
 
-    // ── Key exchange: curve25519-sha256 ────────────────────────────────────
-
-    async fn kex_curve25519(
-        &self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-        cipher: &mut CipherState,
-        v_c: &[u8],
-        v_s: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
-        // Read client KEXINIT
-        let client_kex = read_packet(stream, cipher).await?;
-        if client_kex[0] != SSH_MSG_KEXINIT {
-            return Err("expected KEXINIT".to_string());
-        }
-
-        // Build server KEXINIT
-        let cookie: [u8; 16] = [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        let kex_algorithms = b"curve25519-sha256@libssh.org";
-        let server_host_key_algorithms = b"ssh-ed25519";
-        let encryption_algorithms = b"aes256-ctr";
-        let mac_algorithms = b"hmac-sha256";
-        let compression_algorithms = b"none";
-        let languages = b"";
-
-        let mut kexinit = vec![SSH_MSG_KEXINIT];
-        kexinit.extend_from_slice(&cookie);
-        ssh_string(&mut kexinit, kex_algorithms);
-        ssh_string(&mut kexinit, server_host_key_algorithms);
-        ssh_string(&mut kexinit, encryption_algorithms);
-        ssh_string(&mut kexinit, encryption_algorithms);
-        ssh_string(&mut kexinit, mac_algorithms);
-        ssh_string(&mut kexinit, mac_algorithms);
-        ssh_string(&mut kexinit, compression_algorithms);
-        ssh_string(&mut kexinit, compression_algorithms);
-        ssh_string(&mut kexinit, languages);
-        ssh_string(&mut kexinit, languages);
-        ssh_uint32(&mut kexinit, 0); // first_kex_packet_follows
-        ssh_uint32(&mut kexinit, 0); // reserved
-
-        write_packet(stream, &kexinit, cipher).await?;
-
-        // Server ephemeral key
-        let server_secret = EphemeralSecret::random_from_rng(OsRng);
-        let server_public = XPublicKey::from(&server_secret);
-
-        // Wait for client's KEX_ECDH_INIT (Q_C)
-        let ecdh_init = read_packet(stream, cipher).await?;
-        if ecdh_init[0] != SSH_MSG_KEX_ECDH_INIT {
-            return Err("expected KEX_ECDH_INIT".to_string());
-        }
-        let q_c_bytes = read_ssh_string(&ecdh_init, &mut 1)?;
-        let q_c_len = q_c_bytes.len() as u32;
-
-        // Compute shared secret
-        let q_c_arr: [u8; 32] = q_c_bytes.clone()
-            .try_into()
-            .map_err(|_| "invalid Q_C length".to_string())?;
-        let q_c_point = x25519_dalek::PublicKey::from(q_c_arr);
-        let shared_secret = server_secret.diffie_hellman(&q_c_point);
-        let k = shared_secret.as_bytes().to_vec(); // 32 bytes
-
-        // Host key blob (ed25519 public key in SSH format)
-        let host_pub_bytes = self.host_key_pub.to_bytes();
-        let mut host_key_blob = Vec::new();
-        ssh_string(&mut host_key_blob, b"ssh-ed25519");
-        ssh_string(&mut host_key_blob, &host_pub_bytes);
-
-        // Exchange hash H = SHA256(V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K)
-        let q_s_bytes = server_public.to_bytes();
-        let mut h = Sha256::new();
-        h.update(v_c);
-        h.update(v_s);
-        h.update(&client_kex[1..]); // I_C without msg type
-        h.update(&kexinit[1..]); // I_S without msg type
-        h.update(&host_key_blob); // K_S
-        // Q_C (ssh_string equivalent via manual updates)
-        h.update(&q_c_len.to_be_bytes());
-        h.update(&q_c_bytes);
-        // Q_S (ssh_string equivalent via manual updates)
-        h.update(&(q_s_bytes.len() as u32).to_be_bytes());
-        h.update(&q_s_bytes);
-        h.update(&k); // K
-        let h_digest = h.finalize();
-        let h_bytes = h_digest.to_vec();
-
-        let session_id = if cipher.enc_seq == 0 {
-            h_bytes.clone()
-        } else {
-            h_bytes.clone()
-        };
-
-        // Sign H with host key
-        let sig = self.host_key.sign(&h_bytes);
-        let mut sig_blob = Vec::new();
-        ssh_string(&mut sig_blob, b"ssh-ed25519");
-        ssh_string(&mut sig_blob, &sig.to_bytes());
-
-        // Build KEX_ECDH_REPLY
-        let mut reply = vec![SSH_MSG_KEX_ECDH_REPLY];
-        reply.extend_from_slice(&host_key_blob); // K_S
-        ssh_string(&mut reply, &q_s_bytes); // Q_S
-        ssh_string(&mut reply, &sig_blob); // signature
-
-        write_packet(stream, &reply, cipher).await?;
-
-        // Read NEWKEYS
-        let nk = read_packet(stream, cipher).await?;
-        if nk[0] != SSH_MSG_NEWKEYS {
-            return Err("expected NEWKEYS".to_string());
-        }
-
-        // Send NEWKEYS
-        write_packet(stream, &[SSH_MSG_NEWKEYS], cipher).await?;
-
-        // Derive session keys
-        let k_bytes = &k;
-        let h_bytes = &h_bytes;
-
-        // For aes256-ctr, key size is 32 bytes, IV size is 16 bytes
-        let iv_c2s = &compute_key(k_bytes, h_bytes, b'A', &session_id)[..16];
-        let iv_s2c = &compute_key(k_bytes, h_bytes, b'B', &session_id)[..16];
-        let enc_c2s_key = &compute_key(k_bytes, h_bytes, b'C', &session_id)[..32];
-        let enc_s2c_key = &compute_key(k_bytes, h_bytes, b'D', &session_id)[..32];
-        let mac_c2s_key = &compute_key(k_bytes, h_bytes, b'E', &session_id);
-        let mac_s2c_key = &compute_key(k_bytes, h_bytes, b'F', &session_id);
-
-        // Initialize ciphers
-        let enc_key: [u8; 32] = enc_s2c_key
-            .try_into()
-            .map_err(|_| "bad enc key".to_string())?;
-        let enc_iv: [u8; 16] = iv_s2c.try_into().map_err(|_| "bad iv".to_string())?;
-        let dec_key: [u8; 32] = enc_c2s_key
-            .try_into()
-            .map_err(|_| "bad dec key".to_string())?;
-        let dec_iv: [u8; 16] = iv_c2s.try_into().map_err(|_| "bad dec iv".to_string())?;
-
-        cipher.enc = Some(CtrCipher::new(&enc_key.into(), &enc_iv.into()));
-        cipher.dec = Some(CtrCipher::new(&dec_key.into(), &dec_iv.into()));
-        cipher.enc_mac_key = mac_s2c_key.clone();
-        cipher.dec_mac_key = mac_c2s_key.clone();
-        cipher.kex_done = true;
-
-        Ok((session_id, h_bytes.clone()))
-    }
-
-    // ── User authentication ────────────────────────────────────────────────
-
-    async fn do_auth(
-        &self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-        cipher: &mut CipherState,
-    ) -> Result<(), String> {
-        loop {
-            let payload = read_packet(stream, cipher).await?;
-            if payload.is_empty() || payload[0] != SSH_MSG_USERAUTH_REQUEST {
-                return Err("expected USERAUTH_REQUEST".to_string());
-            }
-            let mut off = 1;
-            let user = read_ssh_string(&payload, &mut off)?;
-            let user_str = String::from_utf8_lossy(&user).to_string();
-            let _svc = read_ssh_string(&payload, &mut off)?;
-            let method = read_ssh_string(&payload, &mut off)?;
-
-            match method.as_slice() {
-                b"password" => {
-                    let flags = read_u8(&payload, &mut off)?;
-                    let _pw_change = (flags & 1) != 0;
-                    let pass = read_ssh_string(&payload, &mut off)?;
-                    let pass_str =
-                        String::from_utf8_lossy(&pass).to_string();
-
-                    let ok = match &self.password {
-                        Some(expected) if pass_str == *expected => true,
-                        _ => {
-                            // Check userpasswd pairs
-                            self.userpasswds.iter().any(|(u, p)| u == &user_str && p == &pass_str)
-                        }
-                    };
-                    // If no password AND no userpasswds, accept any
-                    let ok = ok || (self.password.is_none() && self.userpasswds.is_empty());
-
-                    if ok {
-                        write_packet(stream, &[SSH_MSG_USERAUTH_SUCCESS], cipher).await?;
-                        return Ok(());
-                    } else {
-                        let mut fail = vec![SSH_MSG_USERAUTH_FAILURE];
-                        ssh_string(&mut fail, b"publickey,password");
-                        fail.push(0); // partial success
-                        write_packet(stream, &fail, cipher).await?;
-                    }
-                }
-                b"publickey" => {
-                    let has_sig = read_u8(&payload, &mut off)? != 0;
-                    let key_algo = read_ssh_string(&payload, &mut off)?;
-                    let key_blob = read_ssh_string(&payload, &mut off)?;
-
-                    // Check if it's an ed25519 key we know
-                    let trusted = self.authorized_keys.iter().any(|vk| {
-                        let vk_bytes = vk.to_bytes();
-                        // Build expected blob: ssh-ed25519 || key_bytes
-                        let mut expected_blob = Vec::new();
-                        ssh_string(&mut expected_blob, b"ssh-ed25519");
-                        ssh_string(&mut expected_blob, &vk_bytes);
-                        expected_blob == key_blob
-                    });
-
-                    if !trusted && !self.authorized_keys.is_empty() {
-                        let mut fail = vec![SSH_MSG_USERAUTH_FAILURE];
-                        ssh_string(&mut fail, b"publickey,password");
-                        fail.push(0);
-                        write_packet(stream, &fail, cipher).await?;
-                        continue;
-                    }
-
-                    if !has_sig {
-                        // Just checking if key is accepted
-                        let mut ok = vec![SSH_MSG_USERAUTH_PK_OK];
-                        ssh_string(&mut ok, &key_algo);
-                        ssh_string(&mut ok, &key_blob);
-                        write_packet(stream, &ok, cipher).await?;
-                    } else {
-                        // Verify signature
-                        let _sig = read_ssh_string(&payload, &mut off)?;
-                        // For now, accept any signature if key is in authorized list
-                        // (full verification would parse the signed data)
-                        write_packet(stream, &[SSH_MSG_USERAUTH_SUCCESS], cipher).await?;
-                        return Ok(());
-                    }
-                }
-                _ => {
-                    let mut fail = vec![SSH_MSG_USERAUTH_FAILURE];
-                    ssh_string(&mut fail, b"publickey,password");
-                    fail.push(0);
-                    write_packet(stream, &fail, cipher).await?;
-                }
-            }
-        }
-    }
-
-    // ── SFTP session management ────────────────────────────────────────────
-
-    async fn handle_sftp_session(
-        &self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-        cipher: &mut CipherState,
-    ) -> Result<(), String> {
-        // Expect CHANNEL_OPEN for "session"
-        let payload = read_packet(stream, cipher).await?;
-        if payload[0] != SSH_MSG_CHANNEL_OPEN {
-            return Err("expected CHANNEL_OPEN".to_string());
-        }
-        let mut off = 1;
-        let chan_type = read_ssh_string(&payload, &mut off)?;
-        if chan_type != b"session" {
-            return Err("expected session channel".to_string());
-        }
-        let sender_ch = read_u32(&payload, &mut off)?;
-        let initial_window = read_u32(&payload, &mut off)?;
-        let max_packet = read_u32(&payload, &mut off)?;
-
-        // Confirm channel
-        let mut confirm = vec![SSH_MSG_CHANNEL_OPEN_CONFIRMATION];
-        ssh_uint32(&mut confirm, sender_ch); // recipient channel
-        ssh_uint32(&mut confirm, 0); // sender channel (server-local)
-        ssh_uint32(&mut confirm, initial_window);
-        ssh_uint32(&mut confirm, max_packet);
-        write_packet(stream, &confirm, cipher).await?;
-
-        // Expect CHANNEL_REQUEST for "subsystem: sftp"
-        let payload2 = read_packet(stream, cipher).await?;
-        if payload2[0] != SSH_MSG_CHANNEL_REQUEST {
-            return Err("expected CHANNEL_REQUEST".to_string());
-        }
-        let mut off2 = 1;
-        let _rc = read_u32(&payload2, &mut off2)?;
-        let req_type = read_ssh_string(&payload2, &mut off2)?;
-        let _want_reply = read_u8(&payload2, &mut off2)?;
-
-        if req_type == b"subsystem" {
-            let sub = read_ssh_string(&payload2, &mut off2)?;
-            if sub != b"sftp" {
-                return Err("expected sftp subsystem".to_string());
-            }
-
-            // Send CHANNEL_SUCCESS
-            let mut succ = vec![SSH_MSG_CHANNEL_SUCCESS];
-            ssh_uint32(&mut succ, sender_ch);
-            write_packet(stream, &succ, cipher).await?;
-
-            // Run SFTP protocol on this channel
-            self.run_sftp(stream, cipher, sender_ch).await?;
-        } else {
-            let mut fail = vec![SSH_MSG_CHANNEL_FAILURE];
-            ssh_uint32(&mut fail, sender_ch);
-            write_packet(stream, &fail, cipher).await?;
-        }
-
-        Ok(())
-    }
-
-    // ── SFTP protocol ──────────────────────────────────────────────────────
-
-    async fn run_sftp(
-        &self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-        cipher: &mut CipherState,
-        channel: u32,
-    ) -> Result<(), String> {
-        // Expect SFTP INIT
-        let payload = read_packet(stream, cipher).await?;
-        // payload: SSH_MSG_CHANNEL_DATA (94) || rc(4) || sftp_data
-        if payload[0] != SSH_MSG_CHANNEL_DATA {
-            return Err("expected CHANNEL_DATA".to_string());
-        }
-        let sftp_data = &payload[5..]; // skip msg type + rc
-
-        if sftp_data.is_empty() || sftp_data[0] != SSH_FXP_INIT {
-            return Err("expected SFTP INIT".to_string());
-        }
-        let _version = u32::from_be_bytes(sftp_data[1..5].try_into().unwrap());
-
-        // Send SFTP VERSION
-        let mut sftp_ver = Vec::new();
-        sftp_ver.push(SSH_FXP_VERSION);
-        ssh_uint32(&mut sftp_ver, 3); // version 3
-        // (no extension data)
-        self.sftp_send(stream, cipher, channel, &sftp_ver)
-            .await?;
-
-        // Main SFTP command loop
-        loop {
-            let payload = read_packet(stream, cipher).await?;
-            if payload[0] == SSH_MSG_CHANNEL_EOF || payload[0] == SSH_MSG_CHANNEL_CLOSE {
-                break;
-            }
-            if payload[0] != SSH_MSG_CHANNEL_DATA {
-                continue;
-            }
-            let sftp_data = &payload[5..];
-            if sftp_data.is_empty() {
-                break;
-            }
-
-            let _msg_type = sftp_data[0];
-            if sftp_data.len() < 5 {
-                break;
-            }
-            let req_id = u32::from_be_bytes(sftp_data[1..5].try_into().unwrap());
-
-            let result = self.handle_sftp_command(sftp_data).await;
-
-            match result {
-                Ok(response_data) => {
-                    self.sftp_send(stream, cipher, channel, &response_data)
-                        .await?;
-                }
-                Err(e) => {
-                    let mut status = vec![SSH_FXP_STATUS];
-                    ssh_uint32(&mut status, req_id);
-                    ssh_uint32(&mut status, SFXP_FAILURE);
-                    ssh_string(&mut status, e.as_bytes());
-                    ssh_string(&mut status, b"en");
-                    self.sftp_send(stream, cipher, channel, &status)
-                        .await?;
-                }
-            }
-        }
-
-        // Send CHANNEL_CLOSE
-        let mut close = vec![SSH_MSG_CHANNEL_CLOSE];
-        ssh_uint32(&mut close, channel);
-        write_packet(stream, &close, cipher).await?;
-
-        Ok(())
-    }
-
-    /// Send an SFTP payload wrapped in CHANNEL_DATA.
-    async fn sftp_send(
-        &self,
-        stream: &mut (impl AsyncReadExt + AsyncWriteExt + Unpin),
-        cipher: &mut CipherState,
-        channel: u32,
-        sftp_data: &[u8],
-    ) -> Result<(), String> {
-        let mut msg = vec![SSH_MSG_CHANNEL_DATA];
-        ssh_uint32(&mut msg, channel);
-        ssh_string(&mut msg, sftp_data);
-        write_packet(stream, &msg, cipher).await
-    }
-
-    /// Dispatch a single SFTP command, return the response bytes
-    /// (SFTP layer, not SSH channel wrapped).
-    async fn handle_sftp_command(&self, data: &[u8]) -> Result<Vec<u8>, String> {
-        if data.len() < 5 {
-            return Err("short SFTP message".to_string());
-        }
-        let msg_type = data[0];
-        let req_id = u32::from_be_bytes(data[1..5].try_into().unwrap());
-
-        match msg_type {
-            SSH_FXP_OPEN => self.sftp_open(data, req_id).await,
-            SSH_FXP_CLOSE => self.sftp_close(data, req_id).await,
-            SSH_FXP_READ => self.sftp_read(data, req_id).await,
-            SSH_FXP_WRITE => self.sftp_write(data, req_id).await,
-            SSH_FXP_OPENDIR => self.sftp_opendir(data, req_id).await,
-            SSH_FXP_READDIR => self.sftp_readdir(data, req_id).await,
-            SSH_FXP_REMOVE => self.sftp_remove(data, req_id).await,
-            SSH_FXP_MKDIR => self.sftp_mkdir(data, req_id).await,
-            SSH_FXP_RMDIR => self.sftp_rmdir(data, req_id).await,
-            SSH_FXP_STAT | SSH_FXP_LSTAT => {
-                self.sftp_stat(data, req_id, msg_type == SSH_FXP_LSTAT)
-                    .await
-            }
-            SSH_FXP_REALPATH => self.sftp_realpath(data, req_id).await,
-            SSH_FXP_RENAME => self.sftp_rename(data, req_id).await,
-            SSH_FXP_FSTAT => self.sftp_fstat(data, req_id).await,
-            _ => {
-                // Unknown operation
-                let mut resp = vec![SSH_FXP_STATUS];
-                ssh_uint32(&mut resp, req_id);
-                ssh_uint32(&mut resp, SFXP_OP_UNSUPPORTED);
-                ssh_string(&mut resp, b"unsupported");
-                ssh_string(&mut resp, b"en");
-                Ok(resp)
-            }
-        }
-    }
-
-    /// Route a pinhead request and return the response data.
-    async fn route(&self, op: FsOperation, path: &str, data: Bytes) -> Result<Bytes, String> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let req = Request {
-            op,
-            path: path.to_string(),
-            data,
-            reply: reply_tx,
-        };
-        self.router_tx
-            .send(req)
-            .await
-            .map_err(|_| "router gone".to_string())?;
-        let h_resp = reply_rx
-            .await
-            .map_err(|_| "handler gone".to_string())?
-            .map_err(|e| e)?;
-        Ok(h_resp.data)
-    }
-    // ── SFTP command handlers ──────────────────────────────────────────────
-
-    async fn sftp_open(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-        let _pflags = read_u32(data, &mut off)?;
-        let _attrs = data.get(off..).unwrap_or_default();
-
-        // Route Open to verify the path is accessible
-        self.route(FsOperation::Open, &path, Bytes::new())
-            .await?;
-
-        let handle = self.handles.lock().await.alloc(&path, false);
-
-        let mut resp = vec![SSH_FXP_HANDLE];
-        ssh_uint32(&mut resp, req_id);
-        ssh_string(&mut resp, handle.as_bytes());
-        Ok(resp)
-    }
-
-    async fn sftp_close(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let handle = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid handle".to_string())?;
-
-        // Get path for Release
-        let entry = {
-            let h = self.handles.lock().await;
-            h.get(&handle).cloned()
-        };
-
-        if let Some(entry) = entry {
+    async fn close(&mut self, id: u32, handle: String) -> Result<Status, StatusCode> {
+        if let Some(entry) = self.handles.get(&handle).cloned() {
             let _ = self
                 .route(FsOperation::Release, &entry.path, Bytes::new())
                 .await;
         }
-
-        self.handles.lock().await.free(&handle);
-
-        Ok(make_status(req_id, SFXP_OK, "OK"))
+        self.handles.free(&handle);
+        Ok(Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        })
     }
 
-    async fn sftp_read(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let handle = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid handle".to_string())?;
-        let _offset = read_u64(data, &mut off)?;
-        let _length = read_u32(data, &mut off)?;
-
-        let entry = {
-            let h = self.handles.lock().await;
-            h.get(&handle).cloned()
-        }
-        .ok_or("unknown handle")?;
-
-        let resp_data = self
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, StatusCode> {
+        let entry = self
+            .handles
+            .get(&handle)
+            .cloned()
+            .ok_or(StatusCode::Failure)?;
+        let resp = self
             .route(FsOperation::Read, &entry.path, Bytes::new())
-            .await?;
-
-        let mut sftp_resp = vec![SSH_FXP_DATA];
-        ssh_uint32(&mut sftp_resp, req_id);
-        ssh_string(&mut sftp_resp, &resp_data);
-        Ok(sftp_resp)
-    }
-
-    async fn sftp_write(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let handle = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid handle".to_string())?;
-        let _offset = read_u64(data, &mut off)?;
-        let write_data = read_ssh_string(data, &mut off)?;
-
-        let entry = {
-            let h = self.handles.lock().await;
-            h.get(&handle).cloned()
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+        let start = offset as usize;
+        if start >= resp.len() {
+            return Err(StatusCode::Eof);
         }
-        .ok_or("unknown handle")?;
-
-        self.route(FsOperation::Write, &entry.path, Bytes::from(write_data))
-            .await?;
-
-        Ok(make_status(req_id, SFXP_OK, "OK"))
+        let end = start.saturating_add(len as usize).min(resp.len());
+        Ok(Data {
+            id,
+            data: resp[start..end].to_vec(),
+        })
     }
 
-    async fn sftp_opendir(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        _offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Status, StatusCode> {
+        let entry = self
+            .handles
+            .get(&handle)
+            .cloned()
+            .ok_or(StatusCode::Failure)?;
+        self.route(FsOperation::Write, &entry.path, Bytes::from(data))
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+        Ok(Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        })
+    }
 
-        // Route OpenDir
+    async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
         self.route(FsOperation::OpenDir, &path, Bytes::new())
-            .await?;
-
-        let handle = self.handles.lock().await.alloc(&path, true);
-
-        let mut resp = vec![SSH_FXP_HANDLE];
-        ssh_uint32(&mut resp, req_id);
-        ssh_string(&mut resp, handle.as_bytes());
-        Ok(resp)
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+        let handle = self.handles.alloc(&path, true);
+        Ok(Handle { id, handle })
     }
 
-    async fn sftp_readdir(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let handle = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid handle".to_string())?;
-
-        let entry = {
-            let h = self.handles.lock().await;
-            h.get(&handle).cloned()
-        }
-        .ok_or("unknown handle")?;
+    async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, StatusCode> {
+        let entry = self
+            .handles
+            .get(&handle)
+            .cloned()
+            .ok_or(StatusCode::Failure)?;
 
         if !entry.is_dir {
-            return Ok(make_status(req_id, SFXP_FAILURE, "not a directory"));
+            return Err(StatusCode::Failure);
         }
 
-        let resp_data = self
+        let resp = self
             .route(FsOperation::ReadDir, &entry.path, Bytes::new())
             .await
-            .map(|b| {
-                // Parse the response as a list of names
-                let text = String::from_utf8_lossy(&b);
-                text.split(|c: char| c.is_whitespace())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect::<Vec<String>>()
-            })?;
+            .map_err(|_| StatusCode::Failure)?;
 
-        // Build NAME response with "." and ".."
-        let mut names = vec![".".to_string(), "..".to_string()];
-        names.extend(resp_data.iter().map(|s| s.to_string()));
+        let text = String::from_utf8_lossy(&resp);
+        let names: Vec<String> = text
+            .split(|c: char| c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
 
-        let mut resp = vec![SSH_FXP_NAME];
-        ssh_uint32(&mut resp, req_id);
-        ssh_uint32(&mut resp, names.len() as u32);
-        for name in &names {
-            ssh_string(&mut resp, name.as_bytes());
-            ssh_string(&mut resp, name.as_bytes()); // longname (same)
-            // FileAttributes: empty (no attrs)
-            ssh_uint32(&mut resp, 0); // flags = 0
+        let mut files = vec![File::dummy("."), File::dummy("..")];
+        for name in names {
+            files.push(File::dummy(name));
         }
-        Ok(resp)
+
+        Ok(Name { id, files })
     }
 
-    async fn sftp_remove(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-
-        self.route(FsOperation::Unlink, &path, Bytes::new())
-            .await?;
-        Ok(make_status(req_id, SFXP_OK, "OK"))
+    async fn remove(&mut self, id: u32, filename: String) -> Result<Status, StatusCode> {
+        self.route(FsOperation::Unlink, &filename, Bytes::new())
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+        Ok(Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        })
     }
 
-    async fn sftp_mkdir(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-        let _attrs = data.get(off..).unwrap_or_default();
-
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _attrs: FileAttributes,
+    ) -> Result<Status, StatusCode> {
         self.route(FsOperation::MkDir, &path, Bytes::new())
-            .await?;
-        Ok(make_status(req_id, SFXP_OK, "OK"))
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+        Ok(Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        })
     }
 
-    async fn sftp_rmdir(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
         self.route(FsOperation::RmDir, &path, Bytes::new())
-            .await?;
-        Ok(make_status(req_id, SFXP_OK, "OK"))
+            .await
+            .map_err(|_| StatusCode::Failure)?;
+        Ok(Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        })
     }
 
-    async fn sftp_stat(&self, data: &[u8], req_id: u32, _lstat: bool) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-
-        let resp_data = self
-            .route(FsOperation::GetAttr, &path, Bytes::new())
-            .await?;
-
-        let resp_text = String::from_utf8_lossy(&resp_data).to_string();
-        let is_dir = resp_text.contains("directory")
-            || resp_text.contains("mode=directory")
-            || resp_text.contains("dir");
-
-        let mut attrs = Vec::new();
-        let mut flags: u32 = 0;
-        // Parse size from response like "mode=file size=128"
-        let size = if let Some(pos) = resp_text.find("size=") {
-            let rest = &resp_text[pos + 5..];
-            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            num_str.parse::<u64>().unwrap_or(0)
-        } else {
-            resp_data.len() as u64
-        };
-
-        if size > 0 {
-            flags |= 0x00000001; // SSH_FILEXFER_ATTR_SIZE
-            ssh_uint64(&mut attrs, size);
-        }
-
-        flags |= 0x00000004; // SSH_FILEXFER_ATTR_PERMISSIONS
-        let perms = if is_dir { 0o40755u32 } else { 0o100644u32 };
-        ssh_uint32(&mut attrs, perms);
-
-        let mut resp = vec![SSH_FXP_ATTRS];
-        ssh_uint32(&mut resp, req_id);
-        ssh_uint32(&mut resp, flags);
-        resp.extend_from_slice(&attrs);
-        Ok(resp)
-    }
-
-    async fn sftp_fstat(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let handle = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid handle".to_string())?;
-
-        let entry = {
-            let h = self.handles.lock().await;
-            h.get(&handle).cloned()
-        }
-        .ok_or("unknown handle")?;
-
-        // Reuse stat with the handle's path
-        let sftp_data = {
-            let mut d = vec![SSH_FXP_STAT, 0, 0, 0, 0]; // placeholder
-            ssh_string(&mut d, entry.path.as_bytes());
-            d
-        };
-        self.sftp_stat(&sftp_data, req_id, false).await
-    }
-
-    async fn sftp_realpath(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let path = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-
+    async fn realpath(&mut self, id: u32, path: String) -> Result<Name, StatusCode> {
         let resolved = if path.starts_with('/') {
             path
         } else {
             format!("/{path}")
         };
-
-        // Normalize
         let resolved = resolved
             .split('/')
             .filter(|s| !s.is_empty())
@@ -1179,133 +435,331 @@ impl SshSession {
             .join("/");
         let resolved = format!("/{resolved}");
 
-        let mut resp = vec![SSH_FXP_NAME];
-        ssh_uint32(&mut resp, req_id);
-        ssh_uint32(&mut resp, 1); // count
-        ssh_string(&mut resp, resolved.as_bytes());
-        ssh_string(&mut resp, resolved.as_bytes()); // longname
-        ssh_uint32(&mut resp, 0); // attrs flags
-        Ok(resp)
+        Ok(Name {
+            id,
+            files: vec![File::dummy(resolved)],
+        })
     }
 
-    async fn sftp_rename(&self, data: &[u8], req_id: u32) -> Result<Vec<u8>, String> {
-        let mut off = 5;
-        let old = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
-        let new = String::from_utf8(read_ssh_string(data, &mut off)?)
-            .map_err(|_| "invalid path".to_string())?;
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+        self.stat_impl(id, &path).await
+    }
 
-        // Rename not directly in FsOperation; we can do unlink + write, or
-        // we could route it creatively. For now, return unsupported.
-        // Real implementation would need a Rename op.
-        let _ = (old, new);
-        Ok(make_status(
-            req_id,
-            SFXP_OP_UNSUPPORTED,
-            "rename not supported",
-        ))
+    async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+        self.stat_impl(id, &path).await
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, StatusCode> {
+        let entry = self
+            .handles
+            .get(&handle)
+            .cloned()
+            .ok_or(StatusCode::Failure)?;
+        self.stat_impl(id, &entry.path).await
+    }
+
+    async fn rename(
+        &mut self,
+        id: u32,
+        _oldpath: String,
+        _newpath: String,
+    ) -> Result<Status, StatusCode> {
+        Ok(Status {
+            id,
+            status_code: StatusCode::OpUnsupported,
+            error_message: "rename not supported".to_string(),
+            language_tag: "en".to_string(),
+        })
+    }
+
+    /// Route a pinhead request and return the response data.
+    async fn route(&self, op: FsOperation, path: &str, data: Bytes) -> Result<Bytes, String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        // Normalize: routes are registered with leading "/".
+        let normalized = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+        let req = Request {
+            op,
+            path: normalized,
+            data,
+            reply: reply_tx,
+        };
+        self.router_tx
+            .send(req)
+            .await
+            .map_err(|_| "router gone".to_string())?;
+        let h_resp = timeout(Duration::from_secs(60), reply_rx)
+            .await
+            .map_err(|_| "handler timeout (60s)".to_string())?
+            .map_err(|_| "handler gone".to_string())?
+            .map_err(|e| e)?;
+        Ok(h_resp.data)
+    }
+
+    /// Shared implementation for stat/lstat/fstat.
+    async fn stat_impl(&self, id: u32, path: &str) -> Result<Attrs, StatusCode> {
+        let resp = self
+            .route(FsOperation::GetAttr, path, Bytes::new())
+            .await
+            .map_err(|_| StatusCode::NoSuchFile)?;
+
+        let resp_text = String::from_utf8_lossy(&resp).to_string();
+        let is_dir = resp_text.contains("directory")
+            || resp_text.contains("mode=directory")
+            || resp_text.contains("dir");
+
+        let size = if let Some(pos) = resp_text.find("size=") {
+            let rest = &resp_text[pos + 5..];
+            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            num_str.parse::<u64>().unwrap_or(0)
+        } else {
+            resp.len() as u64
+        };
+
+        let mut attrs = FileAttributes::default();
+        if size > 0 {
+            attrs.size = Some(size);
+        }
+        let perms = if is_dir { 0o40755 } else { 0o100644 };
+        attrs.permissions = Some(perms);
+
+        Ok(Attrs { id, attrs })
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── Custom SFTP loop (replaces russh_sftp::server::run) ────────────────────
 
-fn make_status(req_id: u32, code: u32, msg: &str) -> Vec<u8> {
-    let mut resp = vec![SSH_FXP_STATUS];
-    ssh_uint32(&mut resp, req_id);
-    ssh_uint32(&mut resp, code);
-    ssh_string(&mut resp, msg.as_bytes());
-    ssh_string(&mut resp, b"en");
-    resp
+/// Read a single SFTP packet from the stream (4-byte big-endian length + payload).
+async fn read_sftp_packet<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result<Bytes, ()> {
+    let length = stream.read_u32().await.map_err(|_| ())?;
+    let mut buf = vec![0; length as usize];
+    stream.read_exact(&mut buf).await.map_err(|_| ())?;
+    Ok(Bytes::from(buf))
 }
 
-fn ssh_uint64(buf: &mut Vec<u8>, v: u64) {
-    buf.extend_from_slice(&v.to_be_bytes());
+/// Build an SFTP Status packet for error responses.
+fn make_status(id: u32, code: StatusCode) -> Packet {
+    Packet::Status(Status {
+        id,
+        status_code: code,
+        error_message: String::new(),
+        language_tag: String::new(),
+    })
 }
 
-fn read_u64(data: &[u8], off: &mut usize) -> Result<u64, String> {
-    if *off + 8 > data.len() {
-        return Err("short u64".to_string());
+/// Custom SFTP packet read/dispatch loop.
+///
+/// Handles the SFTP handshake (Init → Version) then loops on incoming
+/// request packets, dispatching each to the corresponding `SftpSession`
+/// method, serialising the response, and writing it back to the stream.
+async fn sftp_loop<S>(mut stream: S, mut handler: SftpSession)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // ── Handshake ──────────────────────────────────────────────────────
+    match read_sftp_packet(&mut stream).await {
+        Ok(raw) => {
+            if let Ok(Packet::Init(init)) = Packet::try_from(&mut Bytes::copy_from_slice(&raw)) {
+                match handler.init(init.version, init.extensions).await {
+                    Ok(version) => {
+                        if let Ok(bytes) = Bytes::try_from(Packet::Version(version)) {
+                            let _ = stream.write_all(&bytes).await;
+                            let _ = stream.flush().await;
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+        }
+        Err(_) => return,
     }
-    let v = u64::from_be_bytes(data[*off..*off + 8].try_into().unwrap());
-    *off += 8;
-    Ok(v)
+
+    // ── Main dispatch loop ─────────────────────────────────────────────
+    loop {
+        let raw = match read_sftp_packet(&mut stream).await {
+            Ok(data) => data,
+            Err(_) => break,
+        };
+
+        tokio::task::yield_now().await;
+
+        let packet = match Packet::try_from(&mut Bytes::copy_from_slice(&raw)) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let response = match packet {
+            Packet::Open(req) => {
+                match handler.open(req.id, req.filename, req.pflags, req.attrs).await {
+                    Ok(handle) => Packet::Handle(handle),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Close(req) => {
+                match handler.close(req.id, req.handle).await {
+                    Ok(status) => Packet::Status(status),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Read(req) => {
+                match handler.read(req.id, req.handle, req.offset, req.len).await {
+                    Ok(data) => Packet::Data(data),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Write(req) => {
+                match handler.write(req.id, req.handle, req.offset, req.data).await {
+                    Ok(status) => Packet::Status(status),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::OpenDir(req) => {
+                match handler.opendir(req.id, req.path).await {
+                    Ok(handle) => Packet::Handle(handle),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::ReadDir(req) => {
+                match handler.readdir(req.id, req.handle).await {
+                    Ok(name) => Packet::Name(name),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Remove(req) => {
+                match handler.remove(req.id, req.filename).await {
+                    Ok(status) => Packet::Status(status),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::MkDir(req) => {
+                match handler.mkdir(req.id, req.path, req.attrs).await {
+                    Ok(status) => Packet::Status(status),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::RmDir(req) => {
+                match handler.rmdir(req.id, req.path).await {
+                    Ok(status) => Packet::Status(status),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::RealPath(req) => {
+                match handler.realpath(req.id, req.path).await {
+                    Ok(name) => Packet::Name(name),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Stat(req) => {
+                match handler.stat(req.id, req.path).await {
+                    Ok(attrs) => Packet::Attrs(attrs),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Lstat(req) => {
+                match handler.lstat(req.id, req.path).await {
+                    Ok(attrs) => Packet::Attrs(attrs),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Fstat(req) => {
+                match handler.fstat(req.id, req.handle).await {
+                    Ok(attrs) => Packet::Attrs(attrs),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            Packet::Rename(req) => {
+                match handler.rename(req.id, req.oldpath, req.newpath).await {
+                    Ok(status) => Packet::Status(status),
+                    Err(code) => make_status(req.id, code),
+                }
+            }
+
+            // Unsupported operations → OpUnsupported
+            Packet::SetStat(req) => make_status(req.id, StatusCode::OpUnsupported),
+            Packet::FSetStat(req) => make_status(req.id, StatusCode::OpUnsupported),
+            Packet::ReadLink(req) => make_status(req.id, StatusCode::OpUnsupported),
+            Packet::Symlink(req) => make_status(req.id, StatusCode::OpUnsupported),
+
+            // Responses and unknown → silently skip
+            _ => continue,
+        };
+
+        if let Ok(bytes) = Bytes::try_from(response) {
+            let _ = stream.write_all(&bytes).await;
+            let _ = stream.flush().await;
+        }
+    }
 }
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Configuration for the SSHFS frontend.
 pub struct SshfsConfig {
-    /// Password for password authentication (None = no global password).
+    /// Global password for password authentication (`None` = no global password).
     pub password: Option<String>,
-    /// Path to an authorized_keys file (one ed25519 public key per line).
+    /// Path to an `authorized_keys` file (one ed25519 public key per line).
     pub authorized_keys_path: Option<String>,
     /// Username/password pairs for per-user authentication.
     pub userpasswds: Vec<(String, String)>,
 }
 
-/// Start a minimal SSH/SFTP server on the given TCP address.
+/// Start an SSH/SFTP server on the given TCP address using `russh`.
 ///
-/// For each incoming connection, a new task is spawned to handle the SSH
-/// handshake and SFTP session, forwarding filesystem operations to the
-/// pinhead router.
+/// Each incoming connection is handled by a `russh`-managed task; SFTP
+/// subsystem requests are dispatched to the pinhead path router.
 pub async fn serve(
     router_tx: mpsc::Sender<Request>,
     addr: &str,
     config: SshfsConfig,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    eprintln!("[sshfs] listening on {addr}");
 
-    // Generate host key
+    // Generate an ed25519 host key (rng is scoped to avoid !Send across await).
     let host_key = {
-        let mut key_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut key_bytes);
-        SigningKey::from_bytes(&key_bytes)
+        let mut rng = russh::keys::key::safe_rng();
+        russh::keys::PrivateKey::random(&mut rng, russh::keys::Algorithm::Ed25519).unwrap()
     };
 
-    // Load authorized keys
+    // Load authorized keys.
     let authorized_keys = if let Some(path) = &config.authorized_keys_path {
         load_authorized_keys(path).unwrap_or_default()
     } else {
         Vec::new()
     };
 
-    let handles = Arc::new(Mutex::new(HandleState::new()));
+    let russh_config = Arc::new(Config {
+        auth_rejection_time: Duration::from_secs(3),
+        keys: vec![host_key],
+        ..Default::default()
+    });
 
-    loop {
-        let (mut stream, peer) = listener.accept().await?;
-        eprintln!("[sshfs] connection from {peer}");
+    let mut server = SshServer {
+        router_tx,
+        password: config.password,
+        authorized_keys,
+        userpasswds: config.userpasswds,
+    };
 
-        let router_tx = router_tx.clone();
-        let host_key = host_key.clone();
-        let password = config.password.clone();
-        let keys = authorized_keys.clone();
-        let userpasswds = config.userpasswds.clone();
-        let handles = handles.clone();
-
-        tokio::spawn(async move {
-            let host_key_pub = host_key.verifying_key();
-            let session = SshSession {
-                router_tx,
-                host_key,
-                host_key_pub,
-                handles,
-                password,
-                authorized_keys: keys,
-                userpasswds,
-            };
-
-            if let Err(e) = session.run(&mut stream).await {
-                eprintln!("[sshfs] {peer} error: {e}");
-            }
-
-            let _ = stream.shutdown().await;
-            eprintln!("[sshfs] {peer} disconnected");
-        });
-    }
+    server.run_on_socket(russh_config, &listener).await
 }
 
-/// Load ed25519 public keys from an authorized_keys file.
+/// Load ed25519 public keys from an `authorized_keys` file.
 fn load_authorized_keys(path: &str) -> Result<Vec<VerifyingKey>, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let mut keys = Vec::new();
@@ -1347,7 +801,10 @@ fn simple_base64_decode(input: &str) -> Result<Vec<u8>, String> {
         if c == b'=' {
             break;
         }
-        let val = CHARS.iter().position(|&x| x == c).ok_or("invalid base64")? as u32;
+        let val = CHARS
+            .iter()
+            .position(|&x| x == c)
+            .ok_or("invalid base64")? as u32;
         buf = (buf << 6) | val;
         bits += 6;
         if bits >= 8 {

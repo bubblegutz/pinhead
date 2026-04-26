@@ -38,7 +38,7 @@ pub fn do_request<'lua>(
 ) -> Result<rlua::Value<'lua>, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
+            .timeout_global(Some(Duration::from_secs(5)))
             .build(),
     );
 
