@@ -19,10 +19,10 @@ use router::RouteMeta;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    eprintln!("=== pinhead: filesystem path router (Lua) ===");
-
     // ── 1. Load Lua script ──────────────────────────────────────────────
     let script = load_script();
+
+    eprintln!(">> pinhead: a dynamic virtual filesystem fueled by Lua\n");
 
     // ── 2. Lua setup (synchronous, on main thread) ──────────────────────
     let (cfg, routes, runtime) =
@@ -171,30 +171,46 @@ async fn main() {
 
     // Brief pause for in-flight responses and cleanup guards.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    eprintln!("=== pinhead: done ===");
+    eprintln!("\n>> pinhead: done");
 }
 
 // ── Script loading ─────────────────────────────────────────────────────────
 
 fn load_script() -> String {
-    // Check CLI argument.
+    // 1. CLI argument (covers shebang invocation and direct invocation).
     if let Some(path) = std::env::args().nth(1) {
         if !path.starts_with('-') {
             match std::fs::read_to_string(&path) {
                 Ok(s) => return s,
                 Err(e) => {
-                    eprintln!("[main] warning: cannot read `{path}`: {e}")
+                    eprintln!("[main] error: cannot read `{path}`: {e}");
+                    std::process::exit(1);
                 }
             }
         }
     }
 
-    // Fallback: look for pinhead.lua in CWD.
-    if let Ok(s) = std::fs::read_to_string("pinhead.lua") {
-        return s;
+    // 2. Piped input — read from stdin if it is not a terminal.
+    use std::io::{IsTerminal, Read};
+    if !std::io::stdin().is_terminal() {
+        let mut s = String::new();
+        let n = std::io::stdin()
+            .read_to_string(&mut s)
+            .unwrap_or_else(|e| {
+                eprintln!("[main] error: reading stdin: {e}");
+                std::process::exit(1);
+            });
+        if n > 0 {
+            return s;
+        }
     }
 
-    eprintln!("[main] error: no script found — provide a .lua file as argument or place pinhead.lua in CWD");
+    eprintln!(
+        "\nUsage:\n\
+         \n\x20\x20pinhead SCRIPT.lua\n\
+         \x20\x20#!/path/to/pinhead\n\
+         \x20\x20cat SCRIPT.lua|pinhead\n"
+    );
     std::process::exit(1);
 }
 
