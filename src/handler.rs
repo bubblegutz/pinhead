@@ -505,6 +505,9 @@ impl HandlerRuntime {
         // ── Build the `env` table ─────────────────────────────────────────
         crate::env::register_lua_apis(&lua).map_err(|e| format!("env API: {e}"))?;
 
+        // ── Build the `fs` table ──────────────────────────────────────────
+        crate::fs::register_lua_apis(&lua).map_err(|e| format!("fs API: {e}"))?;
+
         // Execute the script.
         lua.load(script)
             .exec()

@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -51,6 +52,42 @@ pub trait TestClient {
 
     /// Attempt to walk/open a non-existent path, returning the error string.
     fn walk_nonexistent(&mut self, path: &str) -> Result<String, String>;
+
+    /// Write content to a file (create if not exist).
+    fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
+        let _ = (path, content);
+        Err("write_file not implemented for this transport".into())
+    }
+
+    /// Remove a file or empty directory.
+    fn remove(&mut self, path: &str) -> Result<(), String> {
+        let _ = path;
+        Err("remove not implemented for this transport".into())
+    }
+
+    /// Rename/move a file or directory.
+    fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
+        let _ = (old, new);
+        Err("rename not implemented for this transport".into())
+    }
+
+    /// Create a directory.
+    fn create_dir(&mut self, path: &str) -> Result<(), String> {
+        let _ = path;
+        Err("create_dir not implemented for this transport".into())
+    }
+
+    /// Change file mode/permissions.
+    fn chmod(&mut self, path: &str, mode: u32) -> Result<(), String> {
+        let _ = (path, mode);
+        Err("chmod not implemented for this transport".into())
+    }
+
+    /// List directory entry names.
+    fn read_dir_names(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let _ = path;
+        Err("read_dir_names not implemented for this transport".into())
+    }
 }
 
 // ── Port allocation ────────────────────────────────────────────────────────
@@ -674,6 +711,49 @@ impl TestClient for FuseClient {
             Ok(_) => Err("expected path to not exist, but metadata succeeded".into()),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        std::fs::write(&full_path, content).map_err(|e| format!("fuse write: {e}"))
+    }
+
+    fn remove(&mut self, path: &str) -> Result<(), String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        if std::fs::metadata(&full_path).map(|m| m.is_dir()).unwrap_or(false) {
+            std::fs::remove_dir(&full_path).map_err(|e| format!("fuse rmdir: {e}"))
+        } else {
+            std::fs::remove_file(&full_path).map_err(|e| format!("fuse unlink: {e}"))
+        }
+    }
+
+    fn rename(&mut self, old: &str, new: &str) -> Result<(), String> {
+        let full_old = format!("{}/{}", self.mountpoint, old.trim_start_matches('/'));
+        let full_new = format!("{}/{}", self.mountpoint, new.trim_start_matches('/'));
+        std::fs::rename(&full_old, &full_new).map_err(|e| format!("fuse rename: {e}"))
+    }
+
+    fn create_dir(&mut self, path: &str) -> Result<(), String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        std::fs::create_dir(&full_path).map_err(|e| format!("fuse mkdir: {e}"))
+    }
+
+    fn chmod(&mut self, path: &str, mode: u32) -> Result<(), String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        let perm = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(&full_path, perm).map_err(|e| format!("fuse chmod: {e}"))
+    }
+
+    fn read_dir_names(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let full_path = format!("{}/{}", self.mountpoint, path.trim_start_matches('/'));
+        let entries = std::fs::read_dir(&full_path).map_err(|e| format!("fuse readdir: {e}"))?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("fuse readdir entry: {e}"))?;
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        names.sort();
+        Ok(names)
     }
 }
 

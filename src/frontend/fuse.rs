@@ -11,10 +11,10 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use fuser::{
-    AccessFlags, BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
-    FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags, ReplyAttr,
-    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request as FuseRequest, Session, SessionACL, WriteFlags,
+    AccessFlags, BackgroundSession, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType,
+    Filesystem, FopenFlags, Generation, INodeNo, LockOwner, MountOption, OpenFlags, RenameFlags,
+    ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyStatfs, ReplyWrite, Request as FuseRequest, Session, SessionACL, TimeOrNow, WriteFlags,
 };
 use libc;
 use tokio::runtime::Handle;
@@ -139,7 +139,7 @@ impl Filesystem for FuseFilesystem {
             let attr = if parent == INodeNo(1) {
                 self.root_attr.clone()
             } else {
-                let p = self.path_for(parent.0).unwrap_or_default();
+                let _p = self.path_for(parent.0).unwrap_or_default();
                 self.file_attr(parent.0, 0, true)
             };
             return reply.entry(&TTL, &attr, Generation(0));
@@ -172,14 +172,19 @@ impl Filesystem for FuseFilesystem {
                 };
                 reply.entry(&TTL, &self.file_attr(ino, size, is_dir), Generation(0));
             }
-            Err(_) => {
-                // Path not found in route table. This may be an intermediate
-                // directory in a FUSE path walk (e.g. /users when the route
-                // is /users/{id}/profile). Record it as a directory so the
-                // kernel can continue walking to the final component.
-                let ino = self.next_ino();
-                self.record_path(ino, path);
-                reply.entry(&TTL, &self.file_attr(ino, 4096, true), Generation(0));
+            Err(msg) => {
+                if msg.starts_with("no route matches") {
+                    // Path not found in route table. This may be an intermediate
+                    // directory in a FUSE path walk (e.g. /users when the route
+                    // is /users/{id}/profile). Record it as a directory so the
+                    // kernel can continue walking to the final component.
+                    let ino = self.next_ino();
+                    self.record_path(ino, path);
+                    reply.entry(&TTL, &self.file_attr(ino, 4096, true), Generation(0));
+                } else {
+                    // Handler returned an error (e.g. ENOENT from Lua error()).
+                    reply.error(Errno::ENOENT);
+                }
             }
         }
     }
@@ -204,19 +209,24 @@ impl Filesystem for FuseFilesystem {
                     reply.attr(&TTL, &self.file_attr(ino.0, size, is_dir));
                 }
             }
-            Err(_) => {
+            Err(msg) => {
                 // Fall back to lookup to verify the path still exists.
                 match self.send_req(FsOperation::Lookup, &path, Bytes::new()) {
                     Ok(data) => {
                         reply.attr(&TTL, &self.file_attr(ino.0, data.len() as u64, false))
                     }
-                    Err(_) => {
-                        // Path was recorded by lookup as an intermediate
-                        // directory (the route table has no handler for this
-                        // exact path, but it's a prefix of a real route).
-                        // Return a directory attr so the kernel can continue
-                        // walking to the final component.
-                        reply.attr(&TTL, &self.file_attr(ino.0, 4096, true));
+                    Err(lookup_msg) => {
+                        if msg.starts_with("no route matches") && lookup_msg.starts_with("no route matches") {
+                            // Path was recorded by lookup as an intermediate
+                            // directory (the route table has no handler for this
+                            // exact path, but it's a prefix of a real route).
+                            // Return a directory attr so the kernel can continue
+                            // walking to the final component.
+                            reply.attr(&TTL, &self.file_attr(ino.0, 4096, true));
+                        } else {
+                            // Handler returned a real error (e.g. ENOENT).
+                            reply.error(Errno::ENOENT);
+                        }
                     }
                 }
             }
@@ -406,47 +416,183 @@ impl Filesystem for FuseFilesystem {
     fn create(
         &self,
         _req: &FuseRequest,
-        _parent: INodeNo,
-        _name: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        reply.error(Errno::EROFS);
+        let name = name.to_string_lossy().to_string();
+        let parent_path = self.path_for(parent.0).unwrap_or_else(|| "/".into());
+        let path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
+
+        match self.send_req(FsOperation::Create, &path, Bytes::new()) {
+            Ok(_) => {
+                let (is_dir, size) = match self.send_req(FsOperation::GetAttr, &path, Bytes::new()) {
+                    Ok(data) => parse_attr(&data),
+                    Err(_) => (false, 0),
+                };
+                let ino = self.next_ino();
+                self.record_path(ino, path);
+                reply.created(
+                    &TTL,
+                    &self.file_attr(ino, size, is_dir),
+                    Generation(0),
+                    FileHandle(0),
+                    FopenFlags::empty(),
+                );
+            }
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
     fn mkdir(
         &self,
         _req: &FuseRequest,
-        _parent: INodeNo,
-        _name: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        let name = name.to_string_lossy().to_string();
+        let parent_path = self.path_for(parent.0).unwrap_or_else(|| "/".into());
+        let path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
+
+        match self.send_req(FsOperation::MkDir, &path, Bytes::new()) {
+            Ok(_) => {
+                let (is_dir, size) = match self.send_req(FsOperation::GetAttr, &path, Bytes::new()) {
+                    Ok(data) => parse_attr(&data),
+                    Err(_) => (true, 4096),
+                };
+                let ino = self.next_ino();
+                self.record_path(ino, path);
+                reply.entry(&TTL, &self.file_attr(ino, size, is_dir), Generation(0));
+            }
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
-    fn unlink(&self, _req: &FuseRequest, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn unlink(&self, _req: &FuseRequest, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_string_lossy().to_string();
+        let parent_path = self.path_for(parent.0).unwrap_or_else(|| "/".into());
+        let path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
+
+        match self.send_req(FsOperation::Unlink, &path, Bytes::new()) {
+            Ok(_) => reply.ok(),
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
-    fn rmdir(&self, _req: &FuseRequest, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn rmdir(&self, _req: &FuseRequest, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_string_lossy().to_string();
+        let parent_path = self.path_for(parent.0).unwrap_or_else(|| "/".into());
+        let path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
+
+        match self.send_req(FsOperation::RmDir, &path, Bytes::new()) {
+            Ok(_) => reply.ok(),
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
     fn rename(
         &self,
         _req: &FuseRequest,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _newparent: INodeNo,
-        _newname: &OsStr,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
         _flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        reply.error(Errno::EROFS);
+        let name = name.to_string_lossy().to_string();
+        let parent_path = self.path_for(parent.0).unwrap_or_else(|| "/".into());
+        let old_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
+
+        let newname = newname.to_string_lossy().to_string();
+        let newparent_path = self.path_for(newparent.0).unwrap_or_else(|| "/".into());
+        let new_path = format!("{}/{}", newparent_path.trim_end_matches('/'), newname);
+
+        match self.send_req(FsOperation::Rename, &old_path, Bytes::from(new_path.clone())) {
+            Ok(_) => {
+                // Update path cache for the renamed inode.
+                let ino = self.paths.lock().unwrap().iter().find_map(|(ino, p)| {
+                    if *p == old_path { Some(*ino) } else { None }
+                });
+                if let Some(ino) = ino {
+                    self.record_path(ino, new_path);
+                }
+                reply.ok();
+            }
+            Err(_) => reply.error(Errno::EIO),
+        }
+    }
+
+    fn setattr(
+        &self,
+        _req: &FuseRequest,
+        ino: INodeNo,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<FileHandle>,
+        _crtmtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _flags: Option<BsdFileFlags>,
+        reply: ReplyAttr,
+    ) {
+        let path = match self.path_for(ino.0) {
+            Some(p) => p,
+            None => return reply.error(Errno::ENOENT),
+        };
+
+        // Encode attributes as a semicolon-separated string for the Lua handler.
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(m) = mode {
+            parts.push(format!("mode={m}"));
+        }
+        if let Some(u) = uid {
+            parts.push(format!("uid={u}"));
+        }
+        if let Some(g) = gid {
+            parts.push(format!("gid={g}"));
+        }
+        if let Some(s) = size {
+            parts.push(format!("size={s}"));
+        }
+        if let Some(TimeOrNow::SpecificTime(ts)) = atime {
+            let secs = ts.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs()).unwrap_or(0);
+            parts.push(format!("atime={secs}"));
+        }
+        if let Some(TimeOrNow::SpecificTime(ts)) = mtime {
+            let secs = ts.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs()).unwrap_or(0);
+            parts.push(format!("mtime={secs}"));
+        }
+        let payload = Bytes::from(parts.join(";"));
+
+        match self.send_req(FsOperation::SetAttr, &path, payload) {
+            Ok(data) => {
+                let (is_dir, cur_size) = parse_attr(&data);
+                let final_size = size.unwrap_or(cur_size);
+                reply.attr(&TTL, &self.file_attr(ino.0, final_size, is_dir));
+            }
+            Err(_) => {
+                // Fall back to getattr for current attrs.
+                match self.send_req(FsOperation::GetAttr, &path, Bytes::new()) {
+                    Ok(data) => {
+                        let (is_dir, cur_size) = parse_attr(&data);
+                        reply.attr(&TTL, &self.file_attr(ino.0, cur_size, is_dir));
+                    }
+                    Err(_) => reply.error(Errno::ENOENT),
+                }
+            }
+        }
     }
 
     fn flush(
