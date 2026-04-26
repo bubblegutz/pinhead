@@ -369,7 +369,7 @@ async fn handle_walk(
     let mut offset = 10;
     let mut is_dir = parent_is_dir;
 
-    for _ in 0..nwname {
+    for i in 0..nwname {
         if offset + 2 > body.len() {
             return Err("short walk wname".into());
         }
@@ -388,23 +388,29 @@ async fn handle_walk(
             format!("{cur_path}/{child}")
         };
 
-        // Send Lookup to router to verify path exists
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let req = Request {
-            op: FsOperation::Lookup,
-            path: full_path.clone(),
-            data: Bytes::new(),
-            reply: reply_tx,
-        };
-        shared
-            .router_tx
-            .send(req)
-            .await
-            .map_err(|_| "router gone".to_string())?;
-        reply_rx
-            .await
-            .map_err(|_| "handler gone".to_string())?
-            .map_err(|e| format!("lookup failed: {e}"))?;
+        // Only validate the final segment through the router — intermediate
+        // segments may match parameterized routes (e.g. /user/{name}) and
+        // aren't complete paths the router can resolve.
+        let is_last = i + 1 == nwname;
+        if is_last {
+            // Send Lookup to router to verify path exists
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let req = Request {
+                op: FsOperation::Lookup,
+                path: full_path.clone(),
+                data: Bytes::new(),
+                reply: reply_tx,
+            };
+            shared
+                .router_tx
+                .send(req)
+                .await
+                .map_err(|_| "router gone".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "handler gone".to_string())?
+                .map_err(|e| format!("lookup failed: {e}"))?;
+        }
 
         // Allocate qid
         is_dir = child.is_empty() || child == "." || child == "..";

@@ -6,6 +6,7 @@ use rlua::{Lua, RegistryKey, Value};
 use tokio::sync::oneshot;
 
 use crate::serialize;
+use crate::store;
 
 use crate::fsop::FsOperation;
 
@@ -497,6 +498,9 @@ impl HandlerRuntime {
 
             lua.globals().set("req", t).map_err(|e| format!("{e}"))?;
         }
+
+        // ── Build the `doc` and `sql` tables ──────────────────────────────
+        store::register_lua_apis(&lua).map_err(|e| format!("store API: {e}"))?;
 
         // Execute the script.
         lua.load(script)
