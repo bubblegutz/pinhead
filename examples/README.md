@@ -144,6 +144,34 @@ named bundle, making it a fallback for that specific operation type.
 
 **Path patterns** use matchit syntax: `/users/{id}`, `/files/{*path}`.
 
+**Example** — specific routes with op-specific fallbacks:
+
+```lua
+-- Specific routes
+route.read("/hello", function(params, data)
+    return "hello world"
+end)
+
+route.read("/users/{id}", function(params, data)
+    return "user " .. params.id
+end)
+
+-- Fallback for any unmatched read (lookup/getattr/open/read/release/flush)
+route.read.default(function(params, data)
+    return "default read handler for: " .. params.path
+end)
+
+-- Fallback for any unmatched write (lookup/getattr/open/read/write/release/flush/fsync)
+route.write.default(function(params, data)
+    return "default write handler for: " .. params.path .. " data: " .. (data or "nil")
+end)
+
+-- Fallback for any unmatched readdir
+route.readdir.default(function(params, data)
+    return ""
+end)
+```
+
 ## Built-in Globals
 
 | Module | Description |
