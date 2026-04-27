@@ -3,6 +3,13 @@ name = "pinhead"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+lto = "fat"
+strip = "symbols"
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
