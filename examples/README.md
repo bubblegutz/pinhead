@@ -106,11 +106,15 @@ with JSON path queries.
 Mirrors a real directory tree as a virtual filesystem — reads actual files/dirs through pinhead's
 route handlers.
 
-### Utilities (`utilities/`)
+### Comprehensive Demo (`comprehensive/`)
 
-`examples/utilities/main.lua`
+`examples/comprehensive/main.lua`
 
-`log.print()`, `log.debug()`, `env.get()`, `os.date()`, `string.format()` — logging and environment utilities.
+**All API surfaces in one virtual filesystem.** Demonstrates env, log, json, yaml,
+toml, csv (encode/decode/query/jq), doc.* (open/set/get/find), sql.* (open/exec/
+query/row), req.* (HTTP GET with decode, pcall error handling), route bundles
+(route.read, route.readdir), route.default fallback, and SSH/9P/FUSE frontend
+configuration with env-var-driven overrides.
 
 ## Route Definition API
 

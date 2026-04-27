@@ -2,8 +2,10 @@
 --
 -- This example demonstrates organizing route definitions across multiple files.
 -- Uses package.path to find sibling .lua files via require().
+-- fs.cwd() is also available to change Lua's working directory at runtime.
+-- Example: fs.cwd(os.getenv("PINHEAD_CWD") or ".")
 
-package.path = "examples/modular_demo/?.lua;" .. package.path
+package.path = "examples/modular/?.lua;" .. package.path
 
 -- Load modules
 local utils = require("utils")

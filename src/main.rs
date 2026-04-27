@@ -21,13 +21,13 @@ use router::RouteMeta;
 #[tokio::main]
 async fn main() {
     // ── 1. Load Lua script ──────────────────────────────────────────────
-    let script = load_script();
+    let (script, cwd) = load_script();
 
     eprintln!(">> pinhead: a dynamic virtual filesystem fueled by Lua\n");
 
     // ── 2. Lua setup (synchronous, on main thread) ──────────────────────
     let (cfg, routes, runtime) =
-        handler::HandlerRuntime::new(&script).expect("Lua setup failed");
+        handler::HandlerRuntime::new(&script, &cwd).expect("Lua setup failed");
 
     if routes.is_empty() {
         eprintln!("[main] WARNING: no routes registered — add route.register() calls to your script");
@@ -190,12 +190,18 @@ async fn main() {
 
 // ── Script loading ─────────────────────────────────────────────────────────
 
-fn load_script() -> String {
+fn load_script() -> (String, std::path::PathBuf) {
     // 1. CLI argument (covers shebang invocation and direct invocation).
     if let Some(path) = std::env::args().nth(1) {
         if !path.starts_with('-') {
             match std::fs::read_to_string(&path) {
-                Ok(s) => return s,
+                Ok(s) => {
+                    let cwd = std::path::Path::new(&path)
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    return (strip_shebang(s), cwd);
+                }
                 Err(e) => {
                     eprintln!("[main] error: cannot read `{path}`: {e}");
                     std::process::exit(1);
@@ -215,7 +221,8 @@ fn load_script() -> String {
                 std::process::exit(1);
             });
         if n > 0 {
-            return s;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            return (strip_shebang(s), cwd);
         }
     }
 
@@ -226,6 +233,19 @@ fn load_script() -> String {
          \x20\x20cat SCRIPT.lua|pinhead\n"
     );
     std::process::exit(1);
+}
+
+/// Strip a shebang line (`#!…`) from the beginning of a script,
+/// since rlua loads scripts as strings (not files) and won't skip it.
+fn strip_shebang(script: String) -> String {
+    if script.starts_with("#!") {
+        if let Some(rest) = script.splitn(2, '\n').nth(1) {
+            return rest.to_string();
+        }
+        // Script was only the shebang line — return empty.
+        return String::new();
+    }
+    script
 }
 
 

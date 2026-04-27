@@ -75,10 +75,15 @@ impl HandlerRuntime {
     /// by the script.  Runs synchronously — call before entering the async
     /// section of `main`.
     ///
+    /// `cwd` is the working directory for Lua's `dofile()`, `loadfile()`, and
+    /// `require()`.  Defaults to the directory containing the script file, or
+    /// the process CWD for piped scripts.  Can be changed at runtime via
+    /// `fs.cwd(path)`.
+    ///
     /// The script uses `route.register(pattern, ops, func)` and
     /// `route.default(func)` to declare routes, and `fuse.*()` / `ninep.*()`
     /// setters for frontend configuration.
-    pub fn new(script: &str) -> Result<(Config, Vec<RouteRegistration>, Self), String> {
+    pub fn new(script: &str, cwd: &std::path::Path) -> Result<(Config, Vec<RouteRegistration>, Self), String> {
         let lua = Lua::new();
 
         // ── Shared state for route registration ──────────────────────────
@@ -175,38 +180,81 @@ impl HandlerRuntime {
         // Must run after the `route` table is set up but before the user script executes.
         lua.load(r#"
 do
-    function route.read(path, func)
+    route.read = setmetatable({}, { __call = function(_, path, func)
         route.register(path, {"lookup", "getattr", "open", "read", "release", "flush"}, func)
+    end })
+    route.read.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "open", "read", "release", "flush"}, func)
     end
-    function route.write(path, func)
+
+    route.write = setmetatable({}, { __call = function(_, path, func)
         route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+    end })
+    route.write.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
     end
-    function route.readdir(path, func)
+
+    route.readdir = setmetatable({}, { __call = function(_, path, func)
         route.register(path, {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end })
+    route.readdir.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
     end
-    function route.create(path, func)
+
+    route.create = setmetatable({}, { __call = function(_, path, func)
         route.register(path, {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
+    end })
+    route.create.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
     end
-    function route.unlink(path, func)
+
+    route.unlink = setmetatable({}, { __call = function(_, path, func)
         route.register(path, {"unlink", "lookup", "getattr"}, func)
+    end })
+    route.unlink.default = function(func)
+        route.register("/{*path}", {"unlink", "lookup", "getattr"}, func)
     end
-    function route.lookup(path, func)
+
+    route.lookup = setmetatable({}, { __call = function(_, path, func)
         route.register(path, "lookup", func)
+    end })
+    route.lookup.default = function(func)
+        route.register("/{*path}", "lookup", func)
     end
-    function route.getattr(path, func)
+
+    route.getattr = setmetatable({}, { __call = function(_, path, func)
         route.register(path, "getattr", func)
+    end })
+    route.getattr.default = function(func)
+        route.register("/{*path}", "getattr", func)
     end
-    function route.open(path, func)
+
+    route.open = setmetatable({}, { __call = function(_, path, func)
         route.register(path, "open", func)
+    end })
+    route.open.default = function(func)
+        route.register("/{*path}", "open", func)
     end
-    function route.release(path, func)
+
+    route.release = setmetatable({}, { __call = function(_, path, func)
         route.register(path, "release", func)
+    end })
+    route.release.default = function(func)
+        route.register("/{*path}", "release", func)
     end
-    function route.mkdir(path, func)
+
+    route.mkdir = setmetatable({}, { __call = function(_, path, func)
         route.register(path, {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end })
+    route.mkdir.default = function(func)
+        route.register("/{*path}", {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
     end
-    function route.all(path, func)
+
+    route.all = setmetatable({}, { __call = function(_, path, func)
         route.register(path, true, func)
+    end })
+    route.all.default = function(func)
+        route.register("/{*path}", true, func)
     end
 end
 "#)
@@ -675,6 +723,116 @@ end
 
         // ── Build the `fs` table ──────────────────────────────────────────
         crate::fs::register_lua_apis(&lua).map_err(|e| format!("fs API: {e}"))?;
+
+        // ── Set up Lua CWD (for dofile/loadfile/require resolution) ──────
+        {
+            let cwd_str = cwd.to_string_lossy().to_string();
+
+            // Store CWD in a Lua global so dofile/loadfile wrappers can
+            // read it dynamically (and fs.cwd() can update it).
+            lua.globals()
+                .set("__pinhead_cwd", cwd_str.clone())
+                .map_err(|e| format!("{e}"))?;
+
+            // Save original package.path for rebuilding when CWD changes.
+            let orig_pp = lua
+                .globals()
+                .get::<_, rlua::Table>("package")
+                .map_err(|e| format!("{e}"))?
+                .get::<_, String>("path")
+                .map_err(|e| format!("{e}"))?;
+            lua.globals()
+                .set("__pinhead_orig_path", orig_pp.clone())
+                .map_err(|e| format!("{e}"))?;
+
+            // Override dofile, loadfile, and setup package.path.
+            lua.load(&format!(
+                r#"
+do
+    local _old_dofile = dofile
+    local _old_loadfile = loadfile
+
+    dofile = function(path)
+        if type(path) == "string" and path:sub(1,1) ~= "/" then
+            path = __pinhead_cwd .. "/" .. path
+        end
+        return _old_dofile(path)
+    end
+
+    loadfile = function(path)
+        if type(path) == "string" and path:sub(1,1) ~= "/" then
+            path = __pinhead_cwd .. "/" .. path
+        end
+        return _old_loadfile(path)
+    end
+end
+
+package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
+"#,
+            ))
+            .exec()
+            .map_err(|e| format!("CWD setup error: {e}"))?;
+
+            // Add fs.cwd([path]) — getter/setter for Lua's CWD.
+            let fn_ = lua
+                .create_function(
+                    |lua, path: Option<String>| -> Result<String, rlua::Error> {
+                        match path {
+                            Some(p) => {
+                                // Resolve relative paths against current CWD.
+                                let resolved = if p.starts_with('/') {
+                                    p.clone()
+                                } else {
+                                    let cur = lua
+                                        .globals()
+                                        .get::<_, String>("__pinhead_cwd")?;
+                                    format!("{cur}/{p}")
+                                };
+
+                                // Validate it's a directory.
+                                if !std::path::Path::new(&resolved).is_dir() {
+                                    return Err(rlua::Error::RuntimeError(format!(
+                                        "not a directory: {resolved}"
+                                    )));
+                                }
+
+                                // Update __pinhead_cwd.
+                                lua.globals()
+                                    .set("__pinhead_cwd", resolved.as_str())
+                                    .map_err(|e| {
+                                        rlua::Error::RuntimeError(format!(
+                                            "failed to set cwd: {e}"
+                                        ))
+                                    })?;
+
+                                // Rebuild package.path with new CWD.
+                                let orig = lua
+                                    .globals()
+                                    .get::<_, String>("__pinhead_orig_path")?;
+                                let new_pp = format!(
+                                    "{resolved}/?.lua;{resolved}/?/init.lua;{orig}"
+                                );
+                                lua.globals()
+                                    .get::<_, rlua::Table>("package")?
+                                    .set("path", new_pp)?;
+
+                                Ok(resolved)
+                            }
+                            None => {
+                                lua.globals()
+                                    .get::<_, String>("__pinhead_cwd")
+                            }
+                        }
+                    },
+                )
+                .map_err(|e| format!("{e}"))?;
+
+            let fs_table = lua
+                .globals()
+                .get::<_, rlua::Table>("fs")
+                .map_err(|e| format!("{e}"))?;
+            fs_table.set("cwd", fn_).map_err(|e| format!("{e}"))?;
+        }
 
         // Execute the user script.
         lua.load(script)
