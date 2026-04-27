@@ -120,21 +120,24 @@ configuration with env-var-driven overrides.
 
 Routes are registered via the global `route` object:
 
-| Method | Description |
-|---|---|
-| `route.register(path, ops, func)` | Register handler for specific ops (string, table, or `true` for all) |
-| `route.read(path, func)` | Bundle: lookup, getattr, open, read, release, flush |
-| `route.write(path, func)` | Bundle: lookup, getattr, open, read, write, release, flush, fsync |
-| `route.readdir(path, func)` | Bundle: lookup, getattr, opendir, readdir, releasedir |
-| `route.create(path, func)` | Bundle: lookup, getattr, create, open, read, write, release, flush |
-| `route.unlink(path, func)` | Bundle: unlink, lookup, getattr |
-| `route.mkdir(path, func)` | Bundle: mkdir, lookup, getattr, opendir, readdir, releasedir |
-| `route.lookup(path, func)` | Single op: lookup |
-| `route.getattr(path, func)` | Single op: getattr |
-| `route.open(path, func)` | Single op: open |
-| `route.release(path, func)` | Single op: release |
-| `route.all(path, func)` | All 25 FUSE ops |
-| `route.default(func)` | Catch-all for unregistered paths |
+| Method | Default | Description |
+|---|---|---|
+| `route.register(path, ops, func)` | — | Register handler for specific ops (string, table, or `true` for all) |
+| `route.read(path, func)` | `route.read.default(func)` | Bundle: lookup, getattr, open, read, release, flush |
+| `route.write(path, func)` | `route.write.default(func)` | Bundle: lookup, getattr, open, read, write, release, flush, fsync |
+| `route.readdir(path, func)` | `route.readdir.default(func)` | Bundle: lookup, getattr, opendir, readdir, releasedir |
+| `route.create(path, func)` | `route.create.default(func)` | Bundle: lookup, getattr, create, open, read, write, release, flush |
+| `route.unlink(path, func)` | `route.unlink.default(func)` | Bundle: unlink, lookup, getattr |
+| `route.mkdir(path, func)` | `route.mkdir.default(func)` | Bundle: mkdir, lookup, getattr, opendir, readdir, releasedir |
+| `route.lookup(path, func)` | `route.lookup.default(func)` | Single op: lookup |
+| `route.getattr(path, func)` | `route.getattr.default(func)` | Single op: getattr |
+| `route.open(path, func)` | `route.open.default(func)` | Single op: open |
+| `route.release(path, func)` | `route.release.default(func)` | Single op: release |
+| `route.all(path, func)` | `route.all.default(func)` | All 25 FUSE ops |
+| `route.default(func)` | — | Catch-all for unregistered paths (no specific op binding) |
+
+Each `.default` form registers the handler at `/{*path}` (catch-all path) for the same operation set as the
+named bundle, making it a fallback for that specific operation type.
 
 **Handler signature**: `function(params, data)` — `params` is a table of path parameters
 (empty `{}` if none), `data` is a string or nil (write payload). Returns a string.
