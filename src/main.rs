@@ -8,15 +8,16 @@ mod serialize;
 mod store;
 
 mod router; // keep after handler for types
+mod worker;
 
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
-use tokio::task::LocalSet;
 
 use handler::HandlerRequest;
 use router::RouteMeta;
+use worker::WorkerPool;
 
 #[tokio::main]
 async fn main() {
@@ -26,8 +27,8 @@ async fn main() {
     eprintln!(">> pinhead: a dynamic virtual filesystem fueled by Lua\n");
 
     // ── 2. Lua setup (synchronous, on main thread) ──────────────────────
-    let (cfg, routes, runtime) =
-        handler::HandlerRuntime::new(&script, &cwd).expect("Lua setup failed");
+    let (cfg, routes, bytecodes, worker_config) =
+        handler::HandlerRuntime::compile(&script, &cwd).expect("Lua setup failed");
 
     if routes.is_empty() {
         eprintln!("[main] WARNING: no routes registered — add route.register() calls to your script");
@@ -73,9 +74,9 @@ async fn main() {
     let (handler_tx, handler_rx) = mpsc::channel::<HandlerRequest>(64);
     let (frontend_tx, router_h) = rb.build(handler_tx);
 
-    // ── 4. Spawn the !Send Lua handler inside a LocalSet ───────────────
-    let local = LocalSet::new();
-    local.spawn_local(runtime.run(handler_rx));
+    // ── 4. Spawn the worker pool dispatcher ────────────────────────────
+    let pool = WorkerPool::new(4, bytecodes, worker_config);
+    let _worker_h = pool.spawn_dispatcher(handler_rx);
 
     // ── 5. Spawn the router task (Send) ─────────────────────────────────
     let router_h = tokio::spawn(router_h);
@@ -154,7 +155,6 @@ async fn main() {
     let mut sigint =
         signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
     tokio::select! {
-        _ = local     => eprintln!("[main] Lua handler exited"),
         _ = router_h  => eprintln!("[main] router task exited"),
         _ = sigint.recv() => eprintln!("[main] received SIGINT, shutting down"),
     }
@@ -236,7 +236,7 @@ fn load_script() -> (String, std::path::PathBuf) {
 }
 
 /// Strip a shebang line (`#!…`) from the beginning of a script,
-/// since rlua loads scripts as strings (not files) and won't skip it.
+/// since mlua loads scripts as strings (not files) and won't skip it.
 fn strip_shebang(script: String) -> String {
     if script.starts_with("#!") {
         if let Some(rest) = script.splitn(2, '\n').nth(1) {

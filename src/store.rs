@@ -346,7 +346,7 @@ pub(crate) fn send_close_writer(tx: &mpsc::Sender<WriteRequest>) -> Result<(), S
 
 /// Register `doc.*` and `sql.*` Lua tables.  Called from `HandlerRuntime::new`.
 pub fn register_lua_apis(
-    lua: &rlua::Lua,
+    lua: &mlua::Lua,
 ) -> Result<(Arc<Mutex<DbRegistry>>, Arc<Mutex<DbRegistry>>), String> {
     let doc_reg = Arc::new(Mutex::new(DbRegistry::new()));
     let sql_reg = Arc::new(Mutex::new(DbRegistry::new()));
@@ -360,21 +360,21 @@ pub fn register_lua_apis(
 fn get_handle(
     reg: &Mutex<DbRegistry>,
     id: i64,
-) -> Result<DbHandle, rlua::Error> {
+) -> Result<DbHandle, mlua::Error> {
     let r = reg.lock().map_err(|_| {
-        rlua::Error::RuntimeError("database registry lock poisoned".into())
+        mlua::Error::RuntimeError("database registry lock poisoned".into())
     })?;
     r.get(id as u64)
         .cloned()
-        .ok_or_else(|| rlua::Error::RuntimeError("invalid database handle".into()))
+        .ok_or_else(|| mlua::Error::RuntimeError("invalid database handle".into()))
 }
 
-/// Map a Result<T, String> to Result<T, rlua::Error>.
-fn map_err<T>(r: Result<T, String>) -> Result<T, rlua::Error> {
-    r.map_err(|e| rlua::Error::RuntimeError(e.into()))
+/// Map a Result<T, String> to Result<T, mlua::Error>.
+fn map_err<T>(r: Result<T, String>) -> Result<T, mlua::Error> {
+    r.map_err(|e| mlua::Error::RuntimeError(e.into()))
 }
 
-fn register_doc_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), String> {
+fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), String> {
     let t = lua.create_table().map_err(|e| format!("{e}"))?;
 
     // doc.open(path) → handle_id
@@ -383,11 +383,11 @@ fn register_doc_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let fn_ = lua
             .create_function(move |_, path: String| {
                 let mut r = reg.lock().map_err(|_| {
-                    rlua::Error::RuntimeError("registry lock poisoned".into())
+                    mlua::Error::RuntimeError("registry lock poisoned".into())
                 })?;
                 let h = r
                     .open(&path, Some("CREATE TABLE IF NOT EXISTS docs (key TEXT PRIMARY KEY, value TEXT)"))
-                    .map_err(|e| rlua::Error::RuntimeError(e.into()))?;
+                    .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
                 Ok(h.id as i64)
             })
             .map_err(|e| format!("{e}"))?;
@@ -402,7 +402,7 @@ fn register_doc_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                 let h = get_handle(&reg, handle_id)?;
                 let _ = send_close_writer(&h.write_tx);
                 reg.lock()
-                    .map_err(|_| rlua::Error::RuntimeError("registry lock poisoned".into()))?
+                    .map_err(|_| mlua::Error::RuntimeError("registry lock poisoned".into()))?
                     .remove(handle_id as u64);
                 Ok(())
             })
@@ -414,7 +414,7 @@ fn register_doc_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
     {
         let reg = reg.clone();
         let fn_ = lua
-            .create_function(move |lua, (handle_id, key, value): (i64, String, rlua::Value)| {
+            .create_function(move |lua, (handle_id, key, value): (i64, String, mlua::Value)| {
                 let h = get_handle(&reg, handle_id)?;
                 let json = map_err(crate::serialize::json_encode(lua, value))?;
                 map_err(send_exec_writer(
@@ -444,7 +444,7 @@ fn register_doc_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                         let val = map_err(crate::serialize::json_decode(lua, s))?;
                         Ok(val)
                     }
-                    _ => Ok(rlua::Value::Nil),
+                    _ => Ok(mlua::Value::Nil),
                 }
             })
             .map_err(|e| format!("{e}"))?;
@@ -532,7 +532,7 @@ fn register_doc_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
     Ok(())
 }
 
-fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), String> {
+fn register_sql_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), String> {
     let t = lua.create_table().map_err(|e| format!("{e}"))?;
 
     // sql.open(path) → handle_id
@@ -541,11 +541,11 @@ fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let fn_ = lua
             .create_function(move |_, path: String| {
                 let mut r = reg.lock().map_err(|_| {
-                    rlua::Error::RuntimeError("registry lock poisoned".into())
+                    mlua::Error::RuntimeError("registry lock poisoned".into())
                 })?;
                 let h = r
                     .open(&path, None)
-                    .map_err(|e| rlua::Error::RuntimeError(e.into()))?;
+                    .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
                 Ok(h.id as i64)
             })
             .map_err(|e| format!("{e}"))?;
@@ -560,7 +560,7 @@ fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                 let h = get_handle(&reg, handle_id)?;
                 let _ = send_close_writer(&h.write_tx);
                 reg.lock()
-                    .map_err(|_| rlua::Error::RuntimeError("registry lock poisoned".into()))?
+                    .map_err(|_| mlua::Error::RuntimeError("registry lock poisoned".into()))?
                     .remove(handle_id as u64);
                 Ok(())
             })
@@ -573,7 +573,7 @@ fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(
-                move |_, (handle_id, sql, params_val): (i64, String, rlua::Value)| {
+                move |_, (handle_id, sql, params_val): (i64, String, mlua::Value)| {
                     let h = get_handle(&reg, handle_id)?;
                     let params = lua_value_to_params(params_val);
                     let n = map_err(send_exec_writer(&h.write_tx, &sql, params))?;
@@ -589,7 +589,7 @@ fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(
-                move |lua, (handle_id, sql, params_val): (i64, String, rlua::Value)| {
+                move |lua, (handle_id, sql, params_val): (i64, String, mlua::Value)| {
                     let h = get_handle(&reg, handle_id)?;
                     let params = lua_value_to_params(params_val);
                     let rows = map_err(send_query_reader(&h.read_tx, &sql, params))?;
@@ -606,18 +606,18 @@ fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(
-                move |lua, (handle_id, sql, params_val): (i64, String, rlua::Value)| {
+                move |lua, (handle_id, sql, params_val): (i64, String, mlua::Value)| {
                     let h = get_handle(&reg, handle_id)?;
                     let params = lua_value_to_params(params_val);
                     let row = match map_err(send_row_reader(&h.read_tx, &sql, params))? {
                         Some(r) => r,
-                        None => return Ok(rlua::Value::Nil),
+                        None => return Ok(mlua::Value::Nil),
                     };
                     let t = map_err(lua.create_table().map_err(|e| format!("{e}")))?;
                     for (k, v) in &row {
                         set_lua_value(lua, &t, k, v)?;
                     }
-                    Ok(rlua::Value::Table(t))
+                    Ok(mlua::Value::Table(t))
                 },
             )
             .map_err(|e| format!("{e}"))?;
@@ -633,52 +633,52 @@ fn register_sql_api(lua: &rlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
 // ---------------------------------------------------------------------------
 
 fn set_lua_value(
-    lua: &rlua::Lua,
-    t: &rlua::Table,
+    lua: &mlua::Lua,
+    t: &mlua::Table,
     key: &str,
     val: &Value,
-) -> Result<(), rlua::Error> {
+) -> Result<(), mlua::Error> {
     match val {
-        Value::Null => t.set(key, rlua::Value::Nil),
+        Value::Null => t.set(key, mlua::Value::Nil),
         Value::Integer(i) => t.set(key, *i),
         Value::Real(f) => t.set(key, *f),
         Value::Text(s) => {
             let ls = lua
                 .create_string(s.as_bytes())
-                .map_err(|e| rlua::Error::RuntimeError(e.to_string()))?;
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             t.set(key, ls)
         }
     }
 }
 
-fn lua_value_to_params(val: rlua::Value) -> Vec<Param> {
+fn lua_value_to_params(val: mlua::Value) -> Vec<Param> {
     match val {
-        rlua::Value::Nil => vec![],
-        rlua::Value::Integer(i) => vec![Param::Integer(i)],
-        rlua::Value::Number(f) => vec![Param::Real(f)],
-        rlua::Value::String(s) => {
+        mlua::Value::Nil => vec![],
+        mlua::Value::Integer(i) => vec![Param::Integer(i)],
+        mlua::Value::Number(f) => vec![Param::Real(f)],
+        mlua::Value::String(s) => {
             vec![Param::Text(s.to_str().unwrap_or("").to_string())]
         }
-        rlua::Value::Table(t) => {
+        mlua::Value::Table(t) => {
             let mut params = Vec::new();
             for i in 1..=t.len().unwrap_or(0) {
-                let v: rlua::Value = t.get(i).unwrap_or(rlua::Value::Nil);
+                let v: mlua::Value = t.get(i).unwrap_or(mlua::Value::Nil);
                 params.push(lua_single_to_param(v));
             }
             params
         }
-        rlua::Value::Boolean(b) => vec![Param::Integer(if b { 1 } else { 0 })],
+        mlua::Value::Boolean(b) => vec![Param::Integer(if b { 1 } else { 0 })],
         _ => vec![],
     }
 }
 
-fn lua_single_to_param(val: rlua::Value) -> Param {
+fn lua_single_to_param(val: mlua::Value) -> Param {
     match val {
-        rlua::Value::Nil => Param::Null,
-        rlua::Value::Integer(i) => Param::Integer(i),
-        rlua::Value::Number(f) => Param::Real(f),
-        rlua::Value::String(s) => Param::Text(s.to_str().unwrap_or("").to_string()),
-        rlua::Value::Boolean(b) => Param::Integer(if b { 1 } else { 0 }),
+        mlua::Value::Nil => Param::Null,
+        mlua::Value::Integer(i) => Param::Integer(i),
+        mlua::Value::Number(f) => Param::Real(f),
+        mlua::Value::String(s) => Param::Text(s.to_str().unwrap_or("").to_string()),
+        mlua::Value::Boolean(b) => Param::Integer(if b { 1 } else { 0 }),
         _ => Param::Null,
     }
 }
@@ -689,9 +689,9 @@ fn lua_single_to_param(val: rlua::Value) -> Param {
 
 /// Convert key/value rows (from doc.* queries) to a Lua array table.
 fn kv_rows_to_lua<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     rows: &[Row],
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     let t = lua.create_table().map_err(|e| format!("{e}"))?;
     for (i, row) in rows.iter().enumerate() {
         let entry = lua.create_table().map_err(|e| format!("{e}"))?;
@@ -703,35 +703,35 @@ fn kv_rows_to_lua<'lua>(
         }
         if let Some(Value::Text(v)) = row.get("value") {
             let val = crate::serialize::json_decode(lua, v.clone())
-                .unwrap_or(rlua::Value::Nil);
+                .unwrap_or(mlua::Value::Nil);
             entry.set("value", val).map_err(|e| format!("{e}"))?;
         }
         t.set(i + 1, entry).map_err(|e| format!("{e}"))?;
     }
-    Ok(rlua::Value::Table(t))
+    Ok(mlua::Value::Table(t))
 }
 
 /// Convert generic SQL rows to a Lua array table.
 fn sql_rows_to_lua<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     rows: &[Row],
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     let t = lua.create_table().map_err(|e| format!("{e}"))?;
     for (i, row) in rows.iter().enumerate() {
         let entry = lua.create_table().map_err(|e| format!("{e}"))?;
         for (k, v) in row {
-            let val: rlua::Value = match v {
-                Value::Null => rlua::Value::Nil,
-                Value::Integer(n) => rlua::Value::Integer(*n),
-                Value::Real(f) => rlua::Value::Number(*f),
+            let val: mlua::Value = match v {
+                Value::Null => mlua::Value::Nil,
+                Value::Integer(n) => mlua::Value::Integer(*n),
+                Value::Real(f) => mlua::Value::Number(*f),
                 Value::Text(s) => lua
                     .create_string(s.as_bytes())
-                    .map(rlua::Value::String)
-                    .unwrap_or(rlua::Value::Nil),
+                    .map(mlua::Value::String)
+                    .unwrap_or(mlua::Value::Nil),
             };
             entry.set(k.as_str(), val).map_err(|e| format!("{e}"))?;
         }
         t.set(i + 1, entry).map_err(|e| format!("{e}"))?;
     }
-    Ok(rlua::Value::Table(t))
+    Ok(mlua::Value::Table(t))
 }

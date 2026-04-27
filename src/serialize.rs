@@ -23,12 +23,12 @@ use serde_json::Value as Json;
 
 // ── Lua ↔ serde_json::Value conversion ──────────────────────────────────────
 
-pub(crate) fn lua_to_json(lua: &rlua::Lua, val: rlua::Value) -> Result<Json, String> {
+pub(crate) fn lua_to_json(lua: &mlua::Lua, val: mlua::Value) -> Result<Json, String> {
     match val {
-        rlua::Value::Nil => Ok(Json::Null),
-        rlua::Value::Boolean(b) => Ok(Json::Bool(b)),
-        rlua::Value::Integer(i) => Ok(Json::Number(serde_json::Number::from(i))),
-        rlua::Value::Number(n) => {
+        mlua::Value::Nil => Ok(Json::Null),
+        mlua::Value::Boolean(b) => Ok(Json::Bool(b)),
+        mlua::Value::Integer(i) => Ok(Json::Number(serde_json::Number::from(i))),
+        mlua::Value::Number(n) => {
             if !n.is_finite() {
                 return Err("cannot encode non-finite number".into());
             }
@@ -36,26 +36,26 @@ pub(crate) fn lua_to_json(lua: &rlua::Lua, val: rlua::Value) -> Result<Json, Str
                 .map(Json::Number)
                 .ok_or_else(|| format!("cannot encode number {n}"))
         }
-        rlua::Value::String(s) => Ok(Json::String(
+        mlua::Value::String(s) => Ok(Json::String(
             s.to_str().map_err(|e| e.to_string())?.to_string(),
         )),
-        rlua::Value::Table(t) => {
+        mlua::Value::Table(t) => {
             let len: i64 = t.raw_len().try_into().unwrap_or(0);
             if len > 0 {
                 let mut arr = Vec::with_capacity(len as usize);
                 for i in 1..=len {
-                    let v: rlua::Value = t.raw_get(i).map_err(|e| e.to_string())?;
+                    let v: mlua::Value = t.raw_get(i).map_err(|e| e.to_string())?;
                     arr.push(lua_to_json(lua, v)?);
                 }
                 Ok(Json::Array(arr))
             } else {
                 let mut map = serde_json::Map::new();
-                for pair in t.clone().pairs::<rlua::Value, rlua::Value>() {
+                for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
                     let (k, v) = pair.map_err(|e| e.to_string())?;
                     let key = match k {
-                        rlua::Value::String(s) => s.to_str().map_err(|e| e.to_string())?.to_string(),
-                        rlua::Value::Integer(i) => i.to_string(),
-                        rlua::Value::Number(n) => n.to_string(),
+                        mlua::Value::String(s) => s.to_str().map_err(|e| e.to_string())?.to_string(),
+                        mlua::Value::Integer(i) => i.to_string(),
+                        mlua::Value::Number(n) => n.to_string(),
                         _ => return Err("object keys must be strings or numbers".into()),
                     };
                     map.insert(key, lua_to_json(lua, v)?);
@@ -67,22 +67,22 @@ pub(crate) fn lua_to_json(lua: &rlua::Lua, val: rlua::Value) -> Result<Json, Str
     }
 }
 
-fn json_to_lua<'lua>(lua: &'lua rlua::Lua, val: &Json) -> Result<rlua::Value<'lua>, String> {
+fn json_to_lua<'lua>(lua: &'lua mlua::Lua, val: &Json) -> Result<mlua::Value<'lua>, String> {
     match val {
-        Json::Null => Ok(rlua::Value::Nil),
-        Json::Bool(b) => Ok(rlua::Value::Boolean(*b)),
+        Json::Null => Ok(mlua::Value::Nil),
+        Json::Bool(b) => Ok(mlua::Value::Boolean(*b)),
         Json::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(rlua::Value::Integer(i))
+                Ok(mlua::Value::Integer(i))
             } else if let Some(f) = n.as_f64() {
-                Ok(rlua::Value::Number(f))
+                Ok(mlua::Value::Number(f))
             } else {
                 Err(format!("cannot decode number {n}"))
             }
         }
         Json::String(s) => {
             let ls = lua.create_string(s).map_err(|e| e.to_string())?;
-            Ok(rlua::Value::String(ls))
+            Ok(mlua::Value::String(ls))
         }
         Json::Array(arr) => {
             let t = lua.create_table().map_err(|e| e.to_string())?;
@@ -90,7 +90,7 @@ fn json_to_lua<'lua>(lua: &'lua rlua::Lua, val: &Json) -> Result<rlua::Value<'lu
                 t.set((i + 1) as i64, json_to_lua(lua, v)?)
                     .map_err(|e| e.to_string())?;
             }
-            Ok(rlua::Value::Table(t))
+            Ok(mlua::Value::Table(t))
         }
         Json::Object(map) => {
             let t = lua.create_table().map_err(|e| e.to_string())?;
@@ -98,50 +98,50 @@ fn json_to_lua<'lua>(lua: &'lua rlua::Lua, val: &Json) -> Result<rlua::Value<'lu
                 t.set(k.as_str(), json_to_lua(lua, v)?)
                     .map_err(|e| e.to_string())?;
             }
-            Ok(rlua::Value::Table(t))
+            Ok(mlua::Value::Table(t))
         }
     }
 }
 
 // ── JSON ────────────────────────────────────────────────────────────────────
 
-pub fn json_encode(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> {
+pub fn json_encode(lua: &mlua::Lua, val: mlua::Value) -> Result<String, String> {
     serde_json::to_string(&lua_to_json(lua, val)?).map_err(|e| e.to_string())
 }
 
-pub fn json_encode_pretty(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> {
+pub fn json_encode_pretty(lua: &mlua::Lua, val: mlua::Value) -> Result<String, String> {
     serde_json::to_string_pretty(&lua_to_json(lua, val)?).map_err(|e| e.to_string())
 }
 
-pub fn json_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Value<'lua>, String> {
+pub fn json_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Value<'lua>, String> {
     let j: Json = serde_json::from_str(&text).map_err(|e| format!("JSON error: {e}"))?;
     json_to_lua(lua, &j)
 }
 
-pub fn json_from_yaml(_lua: &rlua::Lua, text: String) -> Result<String, String> {
+pub fn json_from_yaml(_lua: &mlua::Lua, text: String) -> Result<String, String> {
     let j: Json = serde_yaml::from_str(&text).map_err(|e| format!("YAML error: {e}"))?;
     serde_json::to_string(&j).map_err(|e| e.to_string())
 }
 
 // ── YAML ────────────────────────────────────────────────────────────────────
 
-pub fn yaml_encode(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> {
+pub fn yaml_encode(lua: &mlua::Lua, val: mlua::Value) -> Result<String, String> {
     serde_yaml::to_string(&lua_to_json(lua, val)?).map_err(|e| format!("YAML error: {e}"))
 }
 
-pub fn yaml_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Value<'lua>, String> {
+pub fn yaml_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Value<'lua>, String> {
     let j: Json = serde_yaml::from_str(&text).map_err(|e| format!("YAML error: {e}"))?;
     json_to_lua(lua, &j)
 }
 
-pub fn yaml_from_json(_lua: &rlua::Lua, text: String) -> Result<String, String> {
+pub fn yaml_from_json(_lua: &mlua::Lua, text: String) -> Result<String, String> {
     let j: Json = serde_json::from_str(&text).map_err(|e| format!("JSON error: {e}"))?;
     serde_yaml::to_string(&j).map_err(|e| format!("YAML error: {e}"))
 }
 
 // ── TOML ────────────────────────────────────────────────────────────────────
 
-pub fn toml_encode(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> {
+pub fn toml_encode(lua: &mlua::Lua, val: mlua::Value) -> Result<String, String> {
     let j = lua_to_json(lua, val)?;
     // TOML only allows objects at the top level.
     let j_obj = match &j {
@@ -155,7 +155,7 @@ pub fn toml_encode(lua: &rlua::Lua, val: rlua::Value) -> Result<String, String> 
     toml::to_string(&j_obj).map_err(|e| format!("TOML error: {e}"))
 }
 
-pub fn toml_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Value<'lua>, String> {
+pub fn toml_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Value<'lua>, String> {
     let j: Json = toml::from_str(&text).map_err(|e| format!("TOML error: {e}"))?;
     json_to_lua(lua, &j)
 }
@@ -165,7 +165,7 @@ pub fn toml_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Val
 // Encode: input is array of tables (each row = one table with string keys).
 // Decode: output is array of tables, keys from header row.
 
-pub fn csv_encode<'lua>(lua: &'lua rlua::Lua, val: rlua::Value) -> Result<String, String> {
+pub fn csv_encode<'lua>(lua: &'lua mlua::Lua, val: mlua::Value) -> Result<String, String> {
     let j = lua_to_json(lua, val)?;
     let rows = match &j {
         Json::Array(arr) => arr,
@@ -216,7 +216,7 @@ pub fn csv_encode<'lua>(lua: &'lua rlua::Lua, val: rlua::Value) -> Result<String
     Ok(String::from_utf8_lossy(&data).to_string())
 }
 
-pub fn csv_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Value<'lua>, String> {
+pub fn csv_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Value<'lua>, String> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
@@ -243,7 +243,7 @@ pub fn csv_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Valu
             } else if let Ok(n) = field.parse::<f64>() {
                 row_t.set(key, n).map_err(|e| e.to_string())?;
             } else if field.is_empty() {
-                row_t.set(key, rlua::Value::Nil).map_err(|e| e.to_string())?;
+                row_t.set(key, mlua::Value::Nil).map_err(|e| e.to_string())?;
             } else {
                 row_t.set(key, field).map_err(|e| e.to_string())?;
             }
@@ -252,7 +252,7 @@ pub fn csv_decode<'lua>(lua: &'lua rlua::Lua, text: String) -> Result<rlua::Valu
         idx += 1;
     }
 
-    Ok(rlua::Value::Table(result_t))
+    Ok(mlua::Value::Table(result_t))
 }
 
 // ── Path query ──────────────────────────────────────────────────────────────
@@ -307,12 +307,12 @@ fn type_name(val: &Json) -> &'static str {
 
 /// Decode a format, run a path query, return the result as a Lua value.
 fn decode_and_query<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     text: String,
     path: String,
     parser: fn(&str) -> Result<Json, String>,
     format: &str,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     let j = parser(&text).map_err(|e| format!("{format} error: {e}"))?;
     let queried = json_query_value(&j, &path)?;
     json_to_lua(lua, queried)
@@ -335,10 +335,10 @@ fn parse_toml(text: &str) -> Result<Json, String> {
 // ── Public query functions ──────────────────────────────────────────────────
 
 pub fn json_query<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     text: String,
     path: String,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     decode_and_query(lua, text, path, parse_json, "JSON")
 }
 
@@ -347,10 +347,10 @@ pub fn json_query<'lua>(
 /// Uses the `jaq` engine to evaluate arbitrary jq filter expressions.
 /// Returns the result as a Lua value (single output) or an array (multiple outputs).
 pub fn json_jq<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     text: String,
     filter_str: String,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     use jaq_all::{data, fmts, load, json};
     use std::fmt::Write as _;
 
@@ -388,7 +388,7 @@ pub fn json_jq<'lua>(
 
     // 4. Convert results to Lua value.
     if results.is_empty() {
-        return Ok(rlua::Value::Nil);
+        return Ok(mlua::Value::Nil);
     }
     if results.len() == 1 {
         json_to_lua(lua, &results[0])
@@ -399,28 +399,28 @@ pub fn json_jq<'lua>(
 }
 
 pub fn yaml_query<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     text: String,
     path: String,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     decode_and_query(lua, text, path, parse_yaml, "YAML")
 }
 
 pub fn toml_query<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     text: String,
     path: String,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     decode_and_query(lua, text, path, parse_toml, "TOML")
 }
 
 /// CSV query: filter rows by `column=value`.
 /// Returns an array of matching rows (as Lua tables).
 pub fn csv_query<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     text: String,
     filter: String,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     let (col, expected) = filter
         .split_once('=')
         .ok_or_else(|| "CSV query syntax: column=value".to_string())?;
@@ -460,7 +460,7 @@ pub fn csv_query<'lua>(
                 } else if let Ok(n) = field.parse::<f64>() {
                     row_t.set(key, n).map_err(|e| e.to_string())?;
                 } else if field.is_empty() {
-                    row_t.set(key, rlua::Value::Nil).map_err(|e| e.to_string())?;
+                    row_t.set(key, mlua::Value::Nil).map_err(|e| e.to_string())?;
                 } else {
                     row_t.set(key, field).map_err(|e| e.to_string())?;
                 }
@@ -470,5 +470,5 @@ pub fn csv_query<'lua>(
         }
     }
 
-    Ok(rlua::Value::Table(result_t))
+    Ok(mlua::Value::Table(result_t))
 }

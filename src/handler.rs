@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use rlua::{Lua, RegistryKey, Value};
+use mlua::{Lua, RegistryKey, Value};
 use tokio::sync::oneshot;
 
 use crate::serialize;
@@ -58,32 +59,67 @@ pub struct Config {
     pub sshfs_userpasswds: Vec<(String, String)>,
 }
 
+/// Compiled bytecode for all registered Lua handler functions, plus the
+/// optional default handler.  `Send + Sync` — share across workers via `Arc`.
+#[derive(Debug, Clone)]
+pub struct SharedBytecodes {
+    /// The original Lua script text.  Re-executed in each worker to create
+    /// fresh closures with correct upvalues.
+    pub script: String,
+    /// Working directory for `setup_runtime_apis`.
+    pub cwd: std::path::PathBuf,
+}
+
+/// Worker pool configuration, set from Lua via `worker.min()`, `worker.max()`,
+/// and `worker.ttl()`.
+#[derive(Debug)]
+pub struct WorkerConfig {
+    pub min_workers: Arc<AtomicUsize>,
+    pub max_workers: Arc<AtomicUsize>,
+    pub ttl_secs: Arc<AtomicU64>,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            min_workers: Arc::new(AtomicUsize::new(1)),
+            max_workers: Arc::new(AtomicUsize::new(4)),
+            ttl_secs: Arc::new(AtomicU64::new(60)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Lua handler runtime — !Send, must run on one thread via LocalSet
 // ---------------------------------------------------------------------------
 
 /// The Lua runtime state.  Holds the Lua VM and the registered function keys.
 /// `!Send` — must be used via `spawn_local` inside a `tokio::task::LocalSet`.
+#[allow(dead_code)]
 pub struct HandlerRuntime {
     lua: Lua,
     funcs: HashMap<String, RegistryKey>,
     default_handler: Option<RegistryKey>,
 }
 
+#[allow(dead_code)]
 impl HandlerRuntime {
-    /// Create a new Lua VM, load `script`, and register all routes declared
-    /// by the script.  Runs synchronously — call before entering the async
-    /// section of `main`.
+    /// Compile a Lua script and produce route registrations, config, and
+    /// pre-compiled handler bytecodes.  Runs synchronously — call before
+    /// entering the async section of `main`.
     ///
-    /// `cwd` is the working directory for Lua's `dofile()`, `loadfile()`, and
-    /// `require()`.  Defaults to the directory containing the script file, or
-    /// the process CWD for piped scripts.  Can be changed at runtime via
-    /// `fs.cwd(path)`.
+    /// The script registers routes via `route.register(pattern, ops, func)`
+    /// and `route.default(func)`, sets frontend config via `fuse.*()` /
+    /// `ninep.*()` / `sshfs.*()`, and configures the worker pool via
+    /// `worker.min()`, `worker.max()`, `worker.ttl()`.
     ///
-    /// The script uses `route.register(pattern, ops, func)` and
-    /// `route.default(func)` to declare routes, and `fuse.*()` / `ninep.*()`
-    /// setters for frontend configuration.
-    pub fn new(script: &str, cwd: &std::path::Path) -> Result<(Config, Vec<RouteRegistration>, Self), String> {
+    /// Returns `(Config, Vec<RouteRegistration>, SharedBytecodes, WorkerConfig)`.
+    /// The bytecodes can be shared zero-copy across multiple worker `Lua` states.
+    ///
+    /// `cwd` — working directory for Lua's `dofile()`, `loadfile()`, and
+    /// `require()`.  Defaults to the script file's parent directory, or the
+    /// process CWD for piped scripts.
+    pub fn compile(script: &str, cwd: &std::path::Path) -> Result<(Config, Vec<RouteRegistration>, SharedBytecodes, WorkerConfig), String> {
         let lua = Lua::new();
 
         // ── Shared state for route registration ──────────────────────────
@@ -111,7 +147,7 @@ impl HandlerRuntime {
                 let funcs = funcs.clone();
                 let register_fn = lua
                     .create_function(
-                        move |lua, (pattern, ops_val, func): (String, rlua::Value, rlua::Function)| {
+                        move |lua, (pattern, ops_val, func): (String, mlua::Value, mlua::Function)| {
                             let name =
                                 format!("__route_{}", routes.lock().unwrap().len());
                             let key = lua.create_registry_value(func)?;
@@ -119,22 +155,22 @@ impl HandlerRuntime {
                             // Parse ops: nil → all ops, string → single op,
                             // table → set of op strings.
                             let ops: Vec<String> = match &ops_val {
-                                rlua::Value::Nil | rlua::Value::Boolean(true) => Vec::new(),
-                                rlua::Value::String(s) => {
+                                mlua::Value::Nil | mlua::Value::Boolean(true) => Vec::new(),
+                                mlua::Value::String(s) => {
                                     vec![s.to_str()?.to_string()]
                                 }
-                                rlua::Value::Table(t) => {
+                                mlua::Value::Table(t) => {
                                     let mut v = Vec::new();
-                                    for pair in t.clone().pairs::<rlua::Value, rlua::Value>() {
+                                    for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
                                         let (_, val) = pair?;
-                                        if let rlua::Value::String(s) = val {
+                                        if let mlua::Value::String(s) = val {
                                             v.push(s.to_str()?.to_string());
                                         }
                                     }
                                     v
                                 }
                                 _ => {
-                                    return Err(rlua::Error::RuntimeError(
+                                    return Err(mlua::Error::RuntimeError(
                                         "ops must be a string, table, nil, or true".into(),
                                     ))
                                 }
@@ -159,7 +195,7 @@ impl HandlerRuntime {
             {
                 let default_handler = default_handler.clone();
                 let default_fn = lua
-                    .create_function(move |lua, func: rlua::Function| {
+                    .create_function(move |lua, func: mlua::Function| {
                         let key = lua.create_registry_value(func)?;
                         *default_handler.lock().unwrap() = Some(key);
                         Ok(())
@@ -448,391 +484,48 @@ end
                 .map_err(|e| format!("{e}"))?;
         }
 
-        // ── Build the `json` table ─────────────────────────────────────────
+        // ── Build the `worker` table (configurable min/max/ttl) ──────────
+        let worker_config = WorkerConfig::default();
         {
             let t = lua.create_table().map_err(|e| format!("{e}"))?;
 
+            // worker.min(n)
+            let min = worker_config.min_workers.clone();
             let fn_ = lua
-                .create_function(|lua, val: rlua::Value| {
-                    serialize::json_encode(lua, val).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, val: rlua::Value| {
-                    serialize::json_encode_pretty(lua, val).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("enc_pretty", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, text: String| {
-                    serialize::json_decode(lua, text).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, (text, path): (String, String)| {
-                    serialize::json_query(lua, text, path).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("q", fn_).map_err(|e| format!("{e}"))?;
-
-            // json.jq(text, filter) — run a jq filter on JSON text
-            {
-                let fn_ = lua
-                    .create_function(|lua, (text, filter): (String, String)| {
-                        serialize::json_jq(lua, text, filter)
-                            .map_err(rlua::Error::RuntimeError)
-                    })
-                    .map_err(|e| format!("{e}"))?;
-                t.set("jq", fn_).map_err(|e| format!("{e}"))?;
-            }
-
-            // json.from_yaml(text) → JSON string, converting YAML to JSON
-            {
-                let fn_ = lua
-                    .create_function(|lua, text: String| {
-                        crate::serialize::json_from_yaml(lua, text)
-                            .map_err(rlua::Error::RuntimeError)
-                    })
-                    .map_err(|e| format!("{e}"))?;
-                t.set("from_yaml", fn_).map_err(|e| format!("{e}"))?;
-            }
-
-            lua.globals().set("json", t).map_err(|e| format!("{e}"))?;
-        }
-
-        // ── Build the `yaml` table ─────────────────────────────────────────
-        {
-            let t = lua.create_table().map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, val: rlua::Value| {
-                    serialize::yaml_encode(lua, val).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, text: String| {
-                    serialize::yaml_decode(lua, text).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, (text, path): (String, String)| {
-                    serialize::yaml_query(lua, text, path).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("q", fn_).map_err(|e| format!("{e}"))?;
-
-            // yaml.from_json(text) → YAML string, converting JSON to YAML
-            {
-                let fn_ = lua
-                    .create_function(|lua, text: String| {
-                        crate::serialize::yaml_from_json(lua, text)
-                            .map_err(rlua::Error::RuntimeError)
-                    })
-                    .map_err(|e| format!("{e}"))?;
-                t.set("from_json", fn_).map_err(|e| format!("{e}"))?;
-            }
-
-            lua.globals().set("yaml", t).map_err(|e| format!("{e}"))?;
-        }
-
-        // ── Build the `toml` table ─────────────────────────────────────────
-        {
-            let t = lua.create_table().map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, val: rlua::Value| {
-                    serialize::toml_encode(lua, val).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, text: String| {
-                    serialize::toml_decode(lua, text).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, (text, path): (String, String)| {
-                    serialize::toml_query(lua, text, path).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("q", fn_).map_err(|e| format!("{e}"))?;
-
-            lua.globals().set("toml", t).map_err(|e| format!("{e}"))?;
-        }
-
-        // ── Build the `csv` table ──────────────────────────────────────────
-        {
-            let t = lua.create_table().map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, val: rlua::Value| {
-                    serialize::csv_encode(lua, val).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("enc", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, text: String| {
-                    serialize::csv_decode(lua, text).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("dec", fn_).map_err(|e| format!("{e}"))?;
-
-            let fn_ = lua
-                .create_function(|lua, (text, filter): (String, String)| {
-                    serialize::csv_query(lua, text, filter).map_err(rlua::Error::RuntimeError)
-                })
-                .map_err(|e| format!("{e}"))?;
-            t.set("q", fn_).map_err(|e| format!("{e}"))?;
-
-            lua.globals().set("csv", t).map_err(|e| format!("{e}"))?;
-        }
-
-        // ── Build the `log` table ──────────────────────────────────────────
-        {
-            let t = lua.create_table().map_err(|e| format!("{e}"))?;
-
-            // log.print(msg) — print to stderr with prefix
-            let fn_ = lua
-                .create_function(|_, msg: String| {
-                    eprintln!("[log.print] {msg}");
+                .create_function(move |_, n: usize| {
+                    min.store(n, Ordering::Release);
                     Ok(())
                 })
                 .map_err(|e| format!("{e}"))?;
-            t.set("print", fn_).map_err(|e| format!("{e}"))?;
+            t.set("min", fn_).map_err(|e| format!("{e}"))?;
 
-            // log.debug(msg) — print to stderr with prefix
+            // worker.max(n)
+            let max = worker_config.max_workers.clone();
             let fn_ = lua
-                .create_function(|_, msg: String| {
-                    eprintln!("[log.debug] {msg}");
+                .create_function(move |_, n: usize| {
+                    max.store(n, Ordering::Release);
                     Ok(())
                 })
                 .map_err(|e| format!("{e}"))?;
-            t.set("debug", fn_).map_err(|e| format!("{e}"))?;
+            t.set("max", fn_).map_err(|e| format!("{e}"))?;
 
-            lua.globals()
-                .set("log", t)
-                .map_err(|e| format!("{e}"))?;
-        }
-
-        // ── Build the `req` table ──────────────────────────────────────────
-        {
-            let t = lua.create_table().map_err(|e| format!("{e}"))?;
-
-            for &method in &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
-                let method_str = method.to_string();
-                let fn_ = lua
-                    .create_function(move |lua, (url, opts): (String, Option<rlua::Table>)| {
-                        crate::req::do_request(lua, &method_str, url, opts)
-                            .map_err(rlua::Error::RuntimeError)
-                    })
-                    .map_err(|e| format!("{e}"))?;
-                t.set(method.to_lowercase(), fn_)
-                    .map_err(|e| format!("{e}"))?;
-            }
-
-            lua.globals().set("req", t).map_err(|e| format!("{e}"))?;
-        }
-
-        // ── Build the `oauth` table ────────────────────────────────────────
-        {
-            let t = lua.create_table().map_err(|e| format!("{e}"))?;
-
-            // oauth.client(config) — returns a client table with method stubs
+            // worker.ttl(seconds)
+            let ttl = worker_config.ttl_secs.clone();
             let fn_ = lua
-                .create_function(|lua, _config: rlua::Table| {
-                    let client = lua.create_table()?;
-
-                    let df = lua
-                        .create_function(|_, scope: String| {
-                            let _ = scope;
-                            Ok(
-                                "Simulated device_flow_start. Requires real OAuth provider."
-                                    .to_string(),
-                            )
-                        })?;
-                    client.set("device_flow_start", df)?;
-
-                    let dp = lua
-                        .create_function(|_, (code, interval, max): (String, i64, i64)| {
-                            let _ = (code, interval, max);
-                            Ok(
-                                "Simulated device_poll. Requires real OAuth provider."
-                                    .to_string(),
-                            )
-                        })?;
-                    client.set("device_poll", dp)?;
-
-                    let ac = lua
-                        .create_function(
-                            |_, (endpoint, scope, state): (String, String, String)| {
-                                let _ = (endpoint, scope, state);
-                                Ok(
-                                    "https://example.com/oauth/authorize?client_id=YOUR_CLIENT_ID&scope=..."
-                                        .to_string(),
-                                )
-                            },
-                        )?;
-                    client.set("auth_code_url", ac)?;
-
-                    let ec = lua
-                        .create_function(
-                            |_, (code, redirect, secret): (String, String, String)| {
-                                let _ = (code, redirect, secret);
-                                Ok(
-                                    "Simulated exchange_code. Requires real OAuth provider."
-                                        .to_string(),
-                                )
-                            },
-                        )?;
-                    client.set("exchange_code", ec)?;
-
-                    let at = lua
-                        .create_function(|_, (_http_client, _token): (rlua::Table, String)| {
-                            Ok(true)
-                        })?;
-                    client.set("attach_to", at)?;
-
-                    Ok(rlua::Value::Table(client))
+                .create_function(move |_, s: u64| {
+                    ttl.store(s, Ordering::Release);
+                    Ok(())
                 })
                 .map_err(|e| format!("{e}"))?;
-            t.set("client", fn_).map_err(|e| format!("{e}"))?;
+            t.set("ttl", fn_).map_err(|e| format!("{e}"))?;
 
             lua.globals()
-                .set("oauth", t)
+                .set("worker", t)
                 .map_err(|e| format!("{e}"))?;
         }
 
-        // ── Build the `doc` and `sql` tables ──────────────────────────────
-        store::register_lua_apis(&lua).map_err(|e| format!("store API: {e}"))?;
-
-        // ── Build the `env` table ─────────────────────────────────────────
-        crate::env::register_lua_apis(&lua).map_err(|e| format!("env API: {e}"))?;
-
-        // ── Build the `fs` table ──────────────────────────────────────────
-        crate::fs::register_lua_apis(&lua).map_err(|e| format!("fs API: {e}"))?;
-
-        // ── Set up Lua CWD (for dofile/loadfile/require resolution) ──────
-        {
-            let cwd_str = cwd.to_string_lossy().to_string();
-
-            // Store CWD in a Lua global so dofile/loadfile wrappers can
-            // read it dynamically (and fs.cwd() can update it).
-            lua.globals()
-                .set("__pinhead_cwd", cwd_str.clone())
-                .map_err(|e| format!("{e}"))?;
-
-            // Save original package.path for rebuilding when CWD changes.
-            let orig_pp = lua
-                .globals()
-                .get::<_, rlua::Table>("package")
-                .map_err(|e| format!("{e}"))?
-                .get::<_, String>("path")
-                .map_err(|e| format!("{e}"))?;
-            lua.globals()
-                .set("__pinhead_orig_path", orig_pp.clone())
-                .map_err(|e| format!("{e}"))?;
-
-            // Override dofile, loadfile, and setup package.path.
-            lua.load(&format!(
-                r#"
-do
-    local _old_dofile = dofile
-    local _old_loadfile = loadfile
-
-    dofile = function(path)
-        if type(path) == "string" and path:sub(1,1) ~= "/" then
-            path = __pinhead_cwd .. "/" .. path
-        end
-        return _old_dofile(path)
-    end
-
-    loadfile = function(path)
-        if type(path) == "string" and path:sub(1,1) ~= "/" then
-            path = __pinhead_cwd .. "/" .. path
-        end
-        return _old_loadfile(path)
-    end
-end
-
-package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
-"#,
-            ))
-            .exec()
-            .map_err(|e| format!("CWD setup error: {e}"))?;
-
-            // Add fs.cwd([path]) — getter/setter for Lua's CWD.
-            let fn_ = lua
-                .create_function(
-                    |lua, path: Option<String>| -> Result<String, rlua::Error> {
-                        match path {
-                            Some(p) => {
-                                // Resolve relative paths against current CWD.
-                                let resolved = if p.starts_with('/') {
-                                    p.clone()
-                                } else {
-                                    let cur = lua
-                                        .globals()
-                                        .get::<_, String>("__pinhead_cwd")?;
-                                    format!("{cur}/{p}")
-                                };
-
-                                // Validate it's a directory.
-                                if !std::path::Path::new(&resolved).is_dir() {
-                                    return Err(rlua::Error::RuntimeError(format!(
-                                        "not a directory: {resolved}"
-                                    )));
-                                }
-
-                                // Update __pinhead_cwd.
-                                lua.globals()
-                                    .set("__pinhead_cwd", resolved.as_str())
-                                    .map_err(|e| {
-                                        rlua::Error::RuntimeError(format!(
-                                            "failed to set cwd: {e}"
-                                        ))
-                                    })?;
-
-                                // Rebuild package.path with new CWD.
-                                let orig = lua
-                                    .globals()
-                                    .get::<_, String>("__pinhead_orig_path")?;
-                                let new_pp = format!(
-                                    "{resolved}/?.lua;{resolved}/?/init.lua;{orig}"
-                                );
-                                lua.globals()
-                                    .get::<_, rlua::Table>("package")?
-                                    .set("path", new_pp)?;
-
-                                Ok(resolved)
-                            }
-                            None => {
-                                lua.globals()
-                                    .get::<_, String>("__pinhead_cwd")
-                            }
-                        }
-                    },
-                )
-                .map_err(|e| format!("{e}"))?;
-
-            let fs_table = lua
-                .globals()
-                .get::<_, rlua::Table>("fs")
-                .map_err(|e| format!("{e}"))?;
-            fs_table.set("cwd", fn_).map_err(|e| format!("{e}"))?;
-        }
+        // ── Set up runtime API tables (json.*, yaml.*, etc.) ────────────
+        setup_runtime_apis(&lua, cwd)?;
 
         // Execute the user script.
         lua.load(script)
@@ -844,11 +537,11 @@ package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
             let mut g = routes.lock().unwrap();
             std::mem::take(&mut *g)
         };
-        let funcs = {
+        let _funcs = {
             let mut g = funcs.lock().unwrap();
             std::mem::take(&mut *g)
         };
-        let default = {
+        let _default = {
             let mut g = default_handler.lock().unwrap();
             g.take()
         };
@@ -863,49 +556,34 @@ package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
             sshfs_userpasswds: sshfs_userpasswds.lock().unwrap().clone(),
         };
 
+        // ── Build SharedBytecodes ──────────────────────────────────────────
+
         Ok((
             cfg,
             registered,
-            Self {
-                lua,
-                funcs,
-                default_handler: default,
+            SharedBytecodes {
+                script: script.to_string(),
+                cwd: cwd.to_path_buf(),
             },
+            worker_config,
         ))
     }
 
-    /// Async handler loop.  Call via `spawn_local` inside a `LocalSet`.
-    ///
-    /// Receives requests, dispatches to the registered Lua function, and
-    /// sends the response back through each request's oneshot channel.
-    pub async fn run(
-        self,
-        mut rx: tokio::sync::mpsc::Receiver<HandlerRequest>,
-    ) {
-        // We use `recv()` (not `blocking_recv()`) because this runs inside
-        // the tokio async runtime via `spawn_local`.
-        while let Some(req) = rx.recv().await {
-            let result = self.call_lua(&req);
-            let _ = req.reply.send(result);
-        }
-        eprintln!("[lua] request channel closed, shutting down handler");
-    }
-
     /// Call the matching Lua function for a single request.
-    fn call_lua(&self, req: &HandlerRequest) -> Result<HandlerResponse, String> {
+    pub(crate) fn call_lua(&self, req: &HandlerRequest) -> Result<HandlerResponse, String> {
         // Find the registered function.
         let key = self.funcs.get(&req.handler_name);
         let func = match key {
             Some(key) => self
                 .lua
-                .registry_value::<rlua::Function>(key)
+                .registry_value::<mlua::Function>(key)
                 .map_err(|e| {
                     format!("failed to get Lua function `{}`: {e}", req.handler_name)
                 })?,
             None => match self.default_handler.as_ref() {
                 Some(key) => self
                     .lua
-                    .registry_value::<rlua::Function>(key)
+                    .registry_value::<mlua::Function>(key)
                     .map_err(|e| format!("failed to get default handler: {e}"))?,
                 None => {
                     return Err(format!(
@@ -947,4 +625,606 @@ package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
             data: Bytes::from(result),
         })
     }
+
+    /// Construct a HandlerRuntime from a `SharedBytecodes` (script + handler
+    /// names).  Creates a fresh Lua state, sets up runtime APIs, re-executes
+    /// the script to create closures with correct upvalues, then reads the
+    /// handler functions from the registry.
+    pub(crate) fn from_bytecodes(
+        lua: Lua,
+        bytecodes: &SharedBytecodes,
+    ) -> Result<Self, String> {
+        // Set up runtime API tables (json.*, yaml.*, etc.).
+        setup_runtime_apis(&lua, &bytecodes.cwd)?;
+
+        // Set up route.* table with local Arcs (discarded after execution).
+        let routes: Arc<Mutex<Vec<RouteRegistration>>> = Arc::new(Mutex::new(Vec::new()));
+        let funcs: Arc<Mutex<HashMap<String, RegistryKey>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let default_handler: Arc<Mutex<Option<RegistryKey>>> =
+            Arc::new(Mutex::new(None));
+
+        {
+            let route_table = lua.create_table().map_err(|e| format!("{e}"))?;
+
+            // route.register(pattern, ops, func)
+            {
+                let routes = routes.clone();
+                let funcs = funcs.clone();
+                let register_fn = lua
+                    .create_function(
+                        move |lua, (pattern, ops_val, func): (String, mlua::Value, mlua::Function)| {
+                            let name =
+                                format!("__route_{}", routes.lock().unwrap().len());
+                            let key = lua.create_registry_value(func)?;
+
+                            let ops: Vec<String> = match &ops_val {
+                                mlua::Value::Nil | mlua::Value::Boolean(true) => Vec::new(),
+                                mlua::Value::String(s) => {
+                                    vec![s.to_str()?.to_string()]
+                                }
+                                mlua::Value::Table(t) => {
+                                    let mut v = Vec::new();
+                                    for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
+                                        let (_, val) = pair?;
+                                        if let mlua::Value::String(s) = val {
+                                            v.push(s.to_str()?.to_string());
+                                        }
+                                    }
+                                    v
+                                }
+                                _ => {
+                                    return Err(mlua::Error::RuntimeError(
+                                        "ops must be a string, table, nil, or true".into(),
+                                    ))
+                                }
+                            };
+
+                            routes.lock().unwrap().push(RouteRegistration {
+                                pattern,
+                                handler_name: name.clone(),
+                                ops,
+                            });
+                            funcs.lock().unwrap().insert(name, key);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("{e}"))?;
+                route_table
+                    .set("register", register_fn)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            // route.default(func)
+            {
+                let default_handler = default_handler.clone();
+                let default_fn = lua
+                    .create_function(move |lua, func: mlua::Function| {
+                        let key = lua.create_registry_value(func)?;
+                        *default_handler.lock().unwrap() = Some(key);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                route_table
+                    .set("default", default_fn)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            lua.globals()
+                .set("route", route_table)
+                .map_err(|e| format!("{e}"))?;
+        }
+
+        // ── Stub frontend tables (fuse.*, ninep.*, sshfs.*) ─────────────
+        // In the worker, frontend config has already been collected during
+        // compile().  These stubs exist so the user script doesn't error
+        // when it references them.
+        for (name, methods) in [
+            ("fuse", &["mount", "unmount", "unmountall"] as &[&str]),
+            ("ninep", &["listen", "kill", "killall"]),
+            ("sshfs", &["listen", "kill", "killall", "password", "authorized_keys", "userpasswd"]),
+        ] {
+            let table = lua.create_table().map_err(|e| format!("{e}"))?;
+            for method in methods {
+                let fn_ = lua
+                    .create_function(move |_, ()| Ok(()))
+                    .map_err(|e| format!("{e}"))?;
+                table
+                    .set(*method, fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+            lua.globals()
+                .set(name, table)
+                .map_err(|e| format!("{e}"))?;
+        }
+        // ── Stub worker.* table ──────────────────────────────────────────
+        lua.globals()
+            .set("worker", lua.create_table().map_err(|e| format!("{e}"))?)
+            .map_err(|e| format!("{e}"))?;
+
+        // Re-execute the convenience wrapper script too.
+        lua.load(r#"
+do
+    route.read = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, {"lookup", "getattr", "open", "read", "release", "flush"}, func)
+    end })
+    route.read.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "open", "read", "release", "flush"}, func)
+    end
+
+    route.write = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+    end })
+    route.write.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+    end
+
+    route.readdir = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end })
+    route.readdir.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end
+
+    route.create = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
+    end })
+    route.create.default = function(func)
+        route.register("/{*path}", {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
+    end
+
+    route.unlink = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, {"unlink", "lookup", "getattr"}, func)
+    end })
+    route.unlink.default = function(func)
+        route.register("/{*path}", {"unlink", "lookup", "getattr"}, func)
+    end
+
+    route.lookup = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, "lookup", func)
+    end })
+    route.lookup.default = function(func)
+        route.register("/{*path}", "lookup", func)
+    end
+
+    route.getattr = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, "getattr", func)
+    end })
+    route.getattr.default = function(func)
+        route.register("/{*path}", "getattr", func)
+    end
+
+    route.open = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, "open", func)
+    end })
+    route.open.default = function(func)
+        route.register("/{*path}", "open", func)
+    end
+
+    route.release = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, "release", func)
+    end })
+    route.release.default = function(func)
+        route.register("/{*path}", "release", func)
+    end
+
+    route.mkdir = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end })
+    route.mkdir.default = function(func)
+        route.register("/{*path}", {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
+    end
+
+    route.all = setmetatable({}, { __call = function(_, path, func)
+        route.register(path, true, func)
+    end })
+    route.all.default = function(func)
+        route.register("/{*path}", true, func)
+    end
+end
+"#)
+            .exec()
+            .map_err(|e| format!("route wrappers error: {e}"))?;
+
+        // Execute the user script.
+        lua.load(&bytecodes.script)
+            .exec()
+            .map_err(|e| format!("Lua script error: {e}"))?;
+
+        // Extract functions from registry using known names.
+        let extracted = {
+            let mut g = funcs.lock().unwrap();
+            std::mem::take(&mut *g)
+        };
+        let default = {
+            let mut g = default_handler.lock().unwrap();
+            g.take()
+        };
+
+        Ok(HandlerRuntime {
+            lua,
+            funcs: extracted,
+            default_handler: default,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime API setup (extracted for reuse by compile() and from_bytecodes())
+// ---------------------------------------------------------------------------
+
+/// Set up all Lua runtime API tables: json.*, yaml.*, toml.*, csv.*, log.*,
+/// req.*, oauth.*, store/doc/sql, env.*, fs.*, and CWD helpers.
+///
+/// Called by both `compile()` (for initial script execution) and
+/// `from_bytecodes()` (for worker states).
+pub(crate) fn setup_runtime_apis(
+    lua: &mlua::Lua,
+    cwd: &std::path::Path,
+) -> std::result::Result<(), String> {
+    // ── Build the `json` table ─────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, val: mlua::Value| {
+                serialize::json_encode(lua, val).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, val: mlua::Value| {
+                serialize::json_encode_pretty(lua, val).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("enc_pretty", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, text: String| {
+                serialize::json_decode(lua, text).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, (text, path): (String, String)| {
+                serialize::json_query(lua, text, path).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+        // json.jq(text, filter) — run a jq filter on JSON text
+        {
+            let fn_ = lua
+                .create_function(|lua, (text, filter): (String, String)| {
+                    serialize::json_jq(lua, text, filter).map_err(mlua::Error::runtime)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("jq", fn_).map_err(|e| format!("{e}"))?;
+        }
+
+        // json.from_yaml(text) → JSON string, converting YAML to JSON
+        {
+            let fn_ = lua
+                .create_function(|lua, text: String| {
+                    crate::serialize::json_from_yaml(lua, text).map_err(mlua::Error::runtime)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("from_yaml", fn_).map_err(|e| format!("{e}"))?;
+        }
+
+        lua.globals().set("json", t).map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `yaml` table ─────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, val: mlua::Value| {
+                serialize::yaml_encode(lua, val).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, text: String| {
+                serialize::yaml_decode(lua, text).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, (text, path): (String, String)| {
+                serialize::yaml_query(lua, text, path).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+        // yaml.from_json(text) → YAML string, converting JSON to YAML
+        {
+            let fn_ = lua
+                .create_function(|lua, text: String| {
+                    crate::serialize::yaml_from_json(lua, text).map_err(mlua::Error::runtime)
+                })
+                .map_err(|e| format!("{e}"))?;
+            t.set("from_json", fn_).map_err(|e| format!("{e}"))?;
+        }
+
+        lua.globals().set("yaml", t).map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `toml` table ─────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, val: mlua::Value| {
+                serialize::toml_encode(lua, val).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, text: String| {
+                serialize::toml_decode(lua, text).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, (text, path): (String, String)| {
+                serialize::toml_query(lua, text, path).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+        lua.globals().set("toml", t).map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `csv` table ──────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, val: mlua::Value| {
+                serialize::csv_encode(lua, val).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("enc", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, text: String| {
+                serialize::csv_decode(lua, text).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("dec", fn_).map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, (text, filter): (String, String)| {
+                serialize::csv_query(lua, text, filter).map_err(mlua::Error::runtime)
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("q", fn_).map_err(|e| format!("{e}"))?;
+
+        lua.globals().set("csv", t).map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `log` table ──────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        // log.print(msg) — print to stderr with prefix
+        let fn_ = lua
+            .create_function(|_, msg: String| {
+                eprintln!("[log.print] {msg}");
+                Ok(())
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("print", fn_).map_err(|e| format!("{e}"))?;
+
+        // log.debug(msg) — print to stderr with prefix
+        let fn_ = lua
+            .create_function(|_, msg: String| {
+                eprintln!("[log.debug] {msg}");
+                Ok(())
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("debug", fn_).map_err(|e| format!("{e}"))?;
+
+        lua.globals()
+            .set("log", t)
+            .map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `req` table ──────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        for &method in &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"] {
+            let method_str = method.to_string();
+            let fn_ = lua
+                .create_function(
+                    move |lua, (url, opts): (String, Option<mlua::Table>)| {
+                        crate::req::do_request(lua, &method_str, url, opts)
+                            .map_err(mlua::Error::runtime)
+                    },
+                )
+                .map_err(|e| format!("{e}"))?;
+            t.set(method.to_lowercase(), fn_)
+                .map_err(|e| format!("{e}"))?;
+        }
+
+        lua.globals().set("req", t).map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `oauth` table ────────────────────────────────────────
+    {
+        let t = lua.create_table().map_err(|e| format!("{e}"))?;
+
+        let fn_ = lua
+            .create_function(|lua, _config: mlua::Table| {
+                let client = lua.create_table()?;
+
+                let df = lua
+                    .create_function(|_, scope: String| {
+                        let _ = scope;
+                        Ok("Simulated device_flow_start. Requires real OAuth provider."
+                            .to_string())
+                    })?;
+                client.set("device_flow_start", df)?;
+
+                let dp = lua
+                    .create_function(|_, (code, interval, max): (String, i64, i64)| {
+                        let _ = (code, interval, max);
+                        Ok("Simulated device_poll. Requires real OAuth provider.".to_string())
+                    })?;
+                client.set("device_poll", dp)?;
+
+                let ac = lua
+                    .create_function(
+                        |_, (endpoint, scope, state): (String, String, String)| {
+                            let _ = (endpoint, scope, state);
+                            Ok("https://example.com/oauth/authorize?client_id=YOUR_CLIENT_ID&scope=..."
+                                .to_string())
+                        },
+                    )?;
+                client.set("auth_code_url", ac)?;
+
+                let ec = lua
+                    .create_function(|_, (code, redirect, secret): (String, String, String)| {
+                        let _ = (code, redirect, secret);
+                        Ok("Simulated exchange_code. Requires real OAuth provider.".to_string())
+                    })?;
+                client.set("exchange_code", ec)?;
+
+                let at = lua
+                    .create_function(|_, (_http_client, _token): (mlua::Table, String)| Ok(true))?;
+                client.set("attach_to", at)?;
+
+                Ok(mlua::Value::Table(client))
+            })
+            .map_err(|e| format!("{e}"))?;
+        t.set("client", fn_).map_err(|e| format!("{e}"))?;
+
+        lua.globals()
+            .set("oauth", t)
+            .map_err(|e| format!("{e}"))?;
+    }
+
+    // ── Build the `doc` and `sql` tables ──────────────────────────────
+    store::register_lua_apis(lua).map_err(|e| format!("store API: {e}"))?;
+
+    // ── Build the `env` table ─────────────────────────────────────────
+    crate::env::register_lua_apis(lua).map_err(|e| format!("env API: {e}"))?;
+
+    // ── Build the `fs` table ──────────────────────────────────────────
+    crate::fs::register_lua_apis(lua).map_err(|e| format!("fs API: {e}"))?;
+
+    // ── Set up Lua CWD (for dofile/loadfile/require resolution) ──────
+    {
+        let cwd_str = cwd.to_string_lossy().to_string();
+
+        // Store CWD in a Lua global so dofile/loadfile wrappers can
+        // read it dynamically (and fs.cwd() can update it).
+        lua.globals()
+            .set("__pinhead_cwd", cwd_str.clone())
+            .map_err(|e| format!("{e}"))?;
+
+        // Save original package.path for rebuilding when CWD changes.
+        let orig_pp = lua
+            .globals()
+            .get::<_, mlua::Table>("package")
+            .map_err(|e| format!("{e}"))?
+            .get::<_, String>("path")
+            .map_err(|e| format!("{e}"))?;
+        lua.globals()
+            .set("__pinhead_orig_path", orig_pp.clone())
+            .map_err(|e| format!("{e}"))?;
+
+        // Override dofile, loadfile, and setup package.path.
+        lua.load(&format!(
+            r#"
+do
+    local _old_dofile = dofile
+    local _old_loadfile = loadfile
+
+    dofile = function(path)
+        if type(path) == "string" and path:sub(1,1) ~= "/" then
+            path = __pinhead_cwd .. "/" .. path
+        end
+        return _old_dofile(path)
+    end
+
+    loadfile = function(path)
+        if type(path) == "string" and path:sub(1,1) ~= "/" then
+            path = __pinhead_cwd .. "/" .. path
+        end
+        return _old_loadfile(path)
+    end
+end
+
+package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
+"#,
+        ))
+        .exec()
+        .map_err(|e| format!("CWD setup error: {e}"))?;
+
+        // Add fs.cwd([path]) — getter/setter for Lua's CWD.
+        let fn_ = lua
+            .create_function(
+                |lua, path: Option<String>| -> Result<String, mlua::Error> {
+                    match path {
+                        Some(p) => {
+                            // Resolve relative paths against current CWD.
+                            let resolved = if p.starts_with('/') {
+                                p.clone()
+                            } else {
+                                let cur =
+                                    lua.globals().get::<_, String>("__pinhead_cwd")?;
+                                format!("{cur}/{p}")
+                            };
+
+                            // Validate it's a directory.
+                            if !std::path::Path::new(&resolved).is_dir() {
+                                return Err(mlua::Error::RuntimeError(format!(
+                                    "not a directory: {resolved}"
+                                )));
+                            }
+
+                            // Update __pinhead_cwd.
+                            lua.globals()
+                                .set("__pinhead_cwd", resolved.as_str())
+                                .map_err(|e| {
+                                    mlua::Error::RuntimeError(format!(
+                                        "failed to set cwd: {e}"
+                                    ))
+                                })?;
+
+                            // Rebuild package.path with new CWD.
+                            let orig = lua
+                                .globals()
+                                .get::<_, String>("__pinhead_orig_path")?;
+                            let new_pp = format!("{resolved}/?.lua;{resolved}/?/init.lua;{orig}");
+                            lua.globals()
+                                .get::<_, mlua::Table>("package")?
+                                .set("path", new_pp)?;
+
+                            Ok(resolved)
+                        }
+                        None => lua.globals().get::<_, String>("__pinhead_cwd"),
+                    }
+                },
+            )
+            .map_err(|e| format!("{e}"))?;
+
+        let fs_table = lua
+            .globals()
+            .get::<_, mlua::Table>("fs")
+            .map_err(|e| format!("{e}"))?;
+        fs_table.set("cwd", fn_).map_err(|e| format!("{e}"))?;
+    }
+
+    Ok(())
 }

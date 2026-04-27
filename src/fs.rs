@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use rlua::Lua;
+use mlua::Lua;
 
 /// Register `fs.*` Lua API functions for real filesystem access.
 ///
@@ -38,7 +38,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.read(path) -> string | nil
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<Option<String>, rlua::Error> {
+            .create_function(|_, path: String| -> Result<Option<String>, mlua::Error> {
                 match fs::read_to_string(&path) {
                     Ok(s) => Ok(Some(s)),
                     Err(_) => Ok(None),
@@ -51,7 +51,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.readdir(path) -> table of entry tables | nil
     {
         let f = lua
-            .create_function(|lua, path: String| -> Result<Option<rlua::Table>, rlua::Error> {
+            .create_function(|lua, path: String| -> Result<Option<mlua::Table>, mlua::Error> {
                 let entries = match fs::read_dir(&path) {
                     Ok(rd) => rd.filter_map(|e| e.ok()).collect::<Vec<_>>(),
                     Err(_) => return Ok(None),
@@ -78,7 +78,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.stat(path) -> table | nil
     {
         let f = lua
-            .create_function(|lua, path: String| -> Result<Option<rlua::Table>, rlua::Error> {
+            .create_function(|lua, path: String| -> Result<Option<mlua::Table>, mlua::Error> {
                 let meta = match fs::metadata(&path) {
                     Ok(m) => m,
                     Err(_) => return Ok(None),
@@ -115,7 +115,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.exists(path) -> boolean
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<bool, rlua::Error> {
+            .create_function(|_, path: String| -> Result<bool, mlua::Error> {
                 Ok(Path::new(&path).exists())
             })
             .map_err(|e| format!("{e}"))?;
@@ -125,7 +125,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.is_dir(path) -> boolean
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<bool, rlua::Error> {
+            .create_function(|_, path: String| -> Result<bool, mlua::Error> {
                 Ok(Path::new(&path).is_dir())
             })
             .map_err(|e| format!("{e}"))?;
@@ -135,7 +135,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.is_file(path) -> boolean
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<bool, rlua::Error> {
+            .create_function(|_, path: String| -> Result<bool, mlua::Error> {
                 Ok(Path::new(&path).is_file())
             })
             .map_err(|e| format!("{e}"))?;
@@ -145,7 +145,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.ls(path) -> {name, ...} | nil
     {
         let f = lua
-            .create_function(|lua, path: String| -> Result<Option<rlua::Table>, rlua::Error> {
+            .create_function(|lua, path: String| -> Result<Option<mlua::Table>, mlua::Error> {
                 let entries = match fs::read_dir(&path) {
                     Ok(rd) => rd.filter_map(|e| e.ok()).collect::<Vec<_>>(),
                     Err(_) => return Ok(None),
@@ -167,7 +167,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     {
         let f = lua
             .create_function(
-                |_, (path, content): (String, String)| -> Result<Option<bool>, rlua::Error> {
+                |_, (path, content): (String, String)| -> Result<Option<bool>, mlua::Error> {
                     match fs::write(&path, &content) {
                         Ok(()) => Ok(Some(true)),
                         Err(_) => Ok(None),
@@ -182,7 +182,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // Removes files and empty directories.
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<Option<bool>, rlua::Error> {
+            .create_function(|_, path: String| -> Result<Option<bool>, mlua::Error> {
                 // Try as file first, then as directory.
                 match fs::remove_file(&path) {
                     Ok(()) => Ok(Some(true)),
@@ -200,7 +200,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // Recursively removes a file or directory tree.
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<Option<bool>, rlua::Error> {
+            .create_function(|_, path: String| -> Result<Option<bool>, mlua::Error> {
                 match fs::remove_dir_all(&path) {
                     Ok(()) => Ok(Some(true)),
                     Err(_) => Ok(None),
@@ -214,7 +214,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     {
         let f = lua
             .create_function(
-                |_, (old, new): (String, String)| -> Result<Option<bool>, rlua::Error> {
+                |_, (old, new): (String, String)| -> Result<Option<bool>, mlua::Error> {
                     match fs::rename(&old, &new) {
                         Ok(()) => Ok(Some(true)),
                         Err(_) => Ok(None),
@@ -229,7 +229,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     {
         let f = lua
             .create_function(
-                |_, (src, dst): (String, String)| -> Result<Option<bool>, rlua::Error> {
+                |_, (src, dst): (String, String)| -> Result<Option<bool>, mlua::Error> {
                     match fs::copy(&src, &dst) {
                         Ok(_) => Ok(Some(true)),
                         Err(_) => Ok(None),
@@ -243,7 +243,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.mkdir(path) -> true | nil
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<Option<bool>, rlua::Error> {
+            .create_function(|_, path: String| -> Result<Option<bool>, mlua::Error> {
                 match fs::create_dir(&path) {
                     Ok(()) => Ok(Some(true)),
                     Err(_) => Ok(None),
@@ -256,7 +256,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.mkdir_all(path) -> true | nil
     {
         let f = lua
-            .create_function(|_, path: String| -> Result<Option<bool>, rlua::Error> {
+            .create_function(|_, path: String| -> Result<Option<bool>, mlua::Error> {
                 match fs::create_dir_all(&path) {
                     Ok(()) => Ok(Some(true)),
                     Err(_) => Ok(None),
@@ -273,7 +273,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     {
         let f = lua
             .create_function(
-                |_, (path, mode): (String, u32)| -> Result<Option<bool>, rlua::Error> {
+                |_, (path, mode): (String, u32)| -> Result<Option<bool>, mlua::Error> {
                     use std::os::unix::fs::PermissionsExt;
                     let perm = fs::Permissions::from_mode(mode);
                     match fs::set_permissions(&path, perm) {
@@ -296,9 +296,9 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
         use std::ffi::CString;
         let f = lua
             .create_function(
-                |_, (path, uid, gid): (String, u32, u32)| -> Result<Option<bool>, rlua::Error> {
+                |_, (path, uid, gid): (String, u32, u32)| -> Result<Option<bool>, mlua::Error> {
                     let cpath = CString::new(path.as_str())
-                        .map_err(|_| rlua::Error::ToLuaConversionError {
+                        .map_err(|_| mlua::Error::ToLuaConversionError {
                             from: "String",
                             to: "CString",
                             message: Some("path contains null byte".into()),
@@ -321,9 +321,9 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
         use std::ffi::CString;
         let f = lua
             .create_function(
-                |_, (path, atime, mtime): (String, i64, i64)| -> Result<Option<bool>, rlua::Error> {
+                |_, (path, atime, mtime): (String, i64, i64)| -> Result<Option<bool>, mlua::Error> {
                     let cpath = CString::new(path.as_str())
-                        .map_err(|_| rlua::Error::ToLuaConversionError {
+                        .map_err(|_| mlua::Error::ToLuaConversionError {
                             from: "String",
                             to: "CString",
                             message: Some("path contains null byte".into()),
@@ -362,7 +362,7 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
     // fs.mode_string(mode) -> string
     {
         let f = lua
-            .create_function(|_, mode: u32| -> Result<String, rlua::Error> {
+            .create_function(|_, mode: u32| -> Result<String, mlua::Error> {
                 Ok(mode_string(mode))
             })
             .map_err(|e| format!("{e}"))?;

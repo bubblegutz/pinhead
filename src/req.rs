@@ -31,11 +31,11 @@ use ureq::http;
 /// When `opts` is `None` and method is GET, returns just the body string.
 /// Otherwise returns a table with `status`, `body`, and `headers` fields.
 pub fn do_request<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     method: &str,
     url: String,
-    opts: Option<rlua::Table<'lua>>,
-) -> Result<rlua::Value<'lua>, String> {
+    opts: Option<mlua::Table<'lua>>,
+) -> Result<mlua::Value<'lua>, String> {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(5)))
@@ -50,17 +50,17 @@ pub fn do_request<'lua>(
 
     if let Some(ref table) = opts {
         // Headers
-        if let Ok(hdrs) = table.get::<_, rlua::Table>("headers") {
-            for pair in hdrs.pairs::<rlua::String, rlua::String>() {
+        if let Ok(hdrs) = table.get::<_, mlua::Table>("headers") {
+            for pair in hdrs.pairs::<mlua::String, mlua::String>() {
                 let (k, v) = pair.map_err(|e| format!("header error: {e}"))?;
                 headers.push((k.to_str().unwrap().to_string(), v.to_str().unwrap().to_string()));
             }
         }
 
         // Query params
-        if let Ok(q) = table.get::<_, rlua::Table>("query") {
+        if let Ok(q) = table.get::<_, mlua::Table>("query") {
             let mut params = Vec::new();
-            for pair in q.pairs::<rlua::Value, rlua::Value>() {
+            for pair in q.pairs::<mlua::Value, mlua::Value>() {
                 let (k, v) = pair.map_err(|e| format!("query error: {e}"))?;
                 params.push((
                     value_to_string(&k).unwrap_or_default(),
@@ -71,15 +71,15 @@ pub fn do_request<'lua>(
         }
 
         // Body: json > form > string (mutually exclusive)
-        if table.get::<_, rlua::Value>("json").is_ok() {
-            let json_val: rlua::Value = table.get("json").map_err(|e| format!("{e}"))?;
+        if table.get::<_, mlua::Value>("json").is_ok() {
+            let json_val: mlua::Value = table.get("json").map_err(|e| format!("{e}"))?;
             let body_str =
                 serde_json::to_string(&crate::serialize::lua_to_json(lua, json_val)?)
                     .map_err(|e| format!("JSON encode error: {e}"))?;
             body_type = BodyType::Json(body_str);
-        } else if let Ok(form_t) = table.get::<_, rlua::Table>("form") {
+        } else if let Ok(form_t) = table.get::<_, mlua::Table>("form") {
             let mut pairs = Vec::new();
-            for pair in form_t.pairs::<rlua::Value, rlua::Value>() {
+            for pair in form_t.pairs::<mlua::Value, mlua::Value>() {
                 let (k, v) = pair.map_err(|e| format!("form error: {e}"))?;
                 pairs.push((
                     value_to_string(&k).unwrap_or_default(),
@@ -164,7 +164,7 @@ pub fn do_request<'lua>(
     // Simple GET without opts — return body string directly
     if method == "GET" && opts.is_none() {
         let s = lua.create_string(&resp_body).map_err(|e| format!("{e}"))?;
-        return Ok(rlua::Value::String(s));
+        return Ok(mlua::Value::String(s));
     }
 
     // Build response table
@@ -176,7 +176,7 @@ pub fn do_request<'lua>(
         decode_response_body(lua, fmt, &resp_body)?
     } else {
         let s = lua.create_string(&resp_body).map_err(|e| format!("{e}"))?;
-        rlua::Value::String(s)
+        mlua::Value::String(s)
     };
     result.set("body", body_lua).map_err(|e| format!("{e}"))?;
 
@@ -191,7 +191,7 @@ pub fn do_request<'lua>(
     }
     result.set("headers", hdrs_t).map_err(|e| format!("{e}"))?;
 
-    Ok(rlua::Value::Table(result))
+    Ok(mlua::Value::Table(result))
 }
 
 enum BodyType {
@@ -202,10 +202,10 @@ enum BodyType {
 }
 
 fn decode_response_body<'lua>(
-    lua: &'lua rlua::Lua,
+    lua: &'lua mlua::Lua,
     format: &str,
     body: &str,
-) -> Result<rlua::Value<'lua>, String> {
+) -> Result<mlua::Value<'lua>, String> {
     match format {
         "json" => crate::serialize::json_decode(lua, body.to_string()),
         "yaml" => crate::serialize::yaml_decode(lua, body.to_string()),
@@ -222,12 +222,12 @@ fn map_ureq_error(e: ureq::Error) -> String {
     }
 }
 
-fn value_to_string(val: &rlua::Value) -> Option<String> {
+fn value_to_string(val: &mlua::Value) -> Option<String> {
     match val {
-        rlua::Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
-        rlua::Value::Integer(i) => Some(i.to_string()),
-        rlua::Value::Number(n) => Some(n.to_string()),
-        rlua::Value::Boolean(b) => Some(b.to_string()),
+        mlua::Value::String(s) => s.to_str().ok().map(|s| s.to_string()),
+        mlua::Value::Integer(i) => Some(i.to_string()),
+        mlua::Value::Number(n) => Some(n.to_string()),
+        mlua::Value::Boolean(b) => Some(b.to_string()),
         _ => None,
     }
 }

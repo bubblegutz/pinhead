@@ -2,7 +2,7 @@
 #[tokio::test(flavor = "current_thread")]
 async fn test_blocking_send_recv_in_runtime() {
     // Create a Lua VM with store APIs.
-    let lua = rlua::Lua::new();
+    let lua = mlua::Lua::new();
     let (_doc_reg, _sql_reg) = pinhead::store::register_lua_apis(&lua).unwrap();
 
     let script = r#"
