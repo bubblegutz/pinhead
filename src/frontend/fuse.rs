@@ -309,8 +309,15 @@ impl Filesystem for FuseFilesystem {
         reply.ok();
     }
 
-    fn open(&self, _req: &FuseRequest, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        reply.opened(FileHandle(0), FopenFlags::empty());
+    fn open(&self, _req: &FuseRequest, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let path = match self.path_for(ino.0) {
+            Some(p) => p,
+            None => return reply.error(Errno::ENOENT),
+        };
+        match self.send_req(FsOperation::Open, &path, Bytes::new()) {
+            Ok(_) => reply.opened(FileHandle(0), FopenFlags::empty()),
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
     fn read(
@@ -374,28 +381,45 @@ impl Filesystem for FuseFilesystem {
     fn release(
         &self,
         _req: &FuseRequest,
-        _ino: INodeNo,
+        ino: INodeNo,
         _fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let path = match self.path_for(ino.0) {
+            Some(p) => p,
+            None => return reply.error(Errno::ENOENT),
+        };
+        let _ = self.send_req(FsOperation::Release, &path, Bytes::new());
         reply.ok();
     }
 
-    fn opendir(&self, _req: &FuseRequest, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        reply.opened(FileHandle(0), FopenFlags::empty());
+    fn opendir(&self, _req: &FuseRequest, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let path = match self.path_for(ino.0) {
+            Some(p) => p,
+            None => return reply.error(Errno::ENOENT),
+        };
+        match self.send_req(FsOperation::OpenDir, &path, Bytes::new()) {
+            Ok(_) => reply.opened(FileHandle(0), FopenFlags::empty()),
+            Err(_) => reply.error(Errno::EIO),
+        }
     }
 
     fn releasedir(
         &self,
         _req: &FuseRequest,
-        _ino: INodeNo,
+        ino: INodeNo,
         _fh: FileHandle,
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
+        let path = match self.path_for(ino.0) {
+            Some(p) => p,
+            None => return reply.error(Errno::ENOENT),
+        };
+        let _ = self.send_req(FsOperation::Release, &path, Bytes::new());
         reply.ok();
     }
 

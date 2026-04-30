@@ -39,9 +39,7 @@ const TWALK: u8 = 110;
 const RWALK: u8 = 111;
 const TOPEN: u8 = 112;
 const ROPEN: u8 = 113;
-#[expect(dead_code, reason = "9P spec — Create/WStat not yet dispatched")]
 const TCREATE: u8 = 114;
-#[expect(dead_code)]
 const RCREATE: u8 = 115;
 const TREAD: u8 = 116;
 const RREAD: u8 = 117;
@@ -53,9 +51,7 @@ const TREMOVE: u8 = 122;
 const RREMOVE: u8 = 123;
 const TSTAT: u8 = 124;
 const RSTAT: u8 = 125;
-#[expect(dead_code, reason = "9P spec — WStat not yet dispatched")]
 const TWSTAT: u8 = 126;
-#[expect(dead_code)]
 const RWSTAT: u8 = 127;
 
 // ── Qid ───────────────────────────────────────────────────────────────
@@ -270,8 +266,10 @@ async fn handle_message(
         TREAD => handle_read(shared, stream, tag, body).await,
         TWRITE => handle_write(shared, stream, tag, body).await,
         TCLUNK => handle_clunk(shared, stream, tag, body).await,
+        TCREATE => handle_create(shared, stream, tag, body).await,
         TREMOVE => handle_remove(shared, stream, tag, body).await,
         TSTAT => handle_stat(shared, stream, tag, body).await,
+        TWSTAT => handle_wstat(shared, stream, tag, body).await,
         TFLUSH => handle_flush(stream, tag).await,
         _ => Err(format!("unknown message type: {msg_type}")),
     }
@@ -476,14 +474,19 @@ async fn handle_open(
     let fid = u32::from_le_bytes(body[0..4].try_into().unwrap());
     let _mode = body[4];
 
-    let path = {
+    let (path, is_dir) = {
         let state = shared.state.lock().await;
-        state.fids.get(&fid).ok_or("unknown fid")?.path.clone()
+        let entry = state.fids.get(&fid).ok_or("unknown fid")?;
+        (entry.path.clone(), entry.is_dir)
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
     let req = Request {
-        op: FsOperation::Open,
+        op: if is_dir {
+            FsOperation::OpenDir
+        } else {
+            FsOperation::Open
+        },
         path,
         data: Bytes::new(),
         reply: reply_tx,
@@ -515,6 +518,97 @@ async fn handle_open(
     );
     reply.extend_from_slice(&msize.to_le_bytes()); // iounit
     send_reply(stream, ROPEN, tag, &reply).await;
+    Ok(())
+}
+
+// ── Create handler ────────────────────────────────────────────────────
+
+const DMDIR: u32 = 0x8000_0000;
+
+async fn handle_create(
+    shared: &Shared,
+    stream: &mut impl NinepStream,
+    tag: u16,
+    body: &[u8],
+) -> Result<(), String> {
+    if body.len() < 9 {
+        return Err("short create message".into());
+    }
+    let fid = u32::from_le_bytes(body[0..4].try_into().unwrap());
+    let name_len = u16::from_le_bytes(body[4..6].try_into().unwrap()) as usize;
+    if 6 + name_len + 5 > body.len() {
+        return Err("short create name".into());
+    }
+    let name =
+        String::from_utf8_lossy(&body[6..6 + name_len]).to_string();
+    let perm = u32::from_le_bytes(
+        body[6 + name_len..6 + name_len + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let _mode = body[6 + name_len + 4];
+
+    // Look up the parent path from the fid.
+    let parent_path = {
+        let state = shared.state.lock().await;
+        state
+            .fids
+            .get(&fid)
+            .ok_or("unknown fid")?
+            .path
+            .clone()
+    };
+
+    let is_dir = (perm & DMDIR) != 0;
+    let full_path = if parent_path.ends_with('/') {
+        format!("{parent_path}{name}")
+    } else {
+        format!("{parent_path}/{name}")
+    };
+
+    let op = if is_dir {
+        FsOperation::MkDir
+    } else {
+        FsOperation::Create
+    };
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let req = Request {
+        op,
+        path: full_path.clone(),
+        data: Bytes::new(),
+        reply: reply_tx,
+    };
+    shared
+        .router_tx
+        .send(req)
+        .await
+        .map_err(|_| "router gone".to_string())?;
+    reply_rx
+        .await
+        .map_err(|_| "handler gone".to_string())?
+        .map_err(|e| format!("{} failed: {e}", op.as_str()))?;
+
+    // Allocate qid for the new file / directory
+    let mut state = shared.state.lock().await;
+    let qid_path = state.alloc_qid(&full_path, is_dir);
+    state.set_fid(fid, qid_path, full_path, is_dir);
+    // Mark the fid as opened (like Topen does).
+    if let Some(entry) = state.fids.get_mut(&fid) {
+        entry.open = true;
+    }
+    drop(state);
+
+    let mut reply = Vec::new();
+    encode_qid(
+        &mut reply,
+        Qid {
+            ty: if is_dir { 0x80 } else { 0x00 },
+            version: 0,
+            path: qid_path,
+        },
+    );
+    send_reply(stream, RCREATE, tag, &reply).await;
     Ok(())
 }
 
@@ -738,14 +832,19 @@ async fn handle_remove(
     }
     let fid = u32::from_le_bytes(body[0..4].try_into().unwrap());
 
-    let path = {
+    let (path, is_dir) = {
         let state = shared.state.lock().await;
-        state.fids.get(&fid).ok_or("unknown fid")?.path.clone()
+        let entry = state.fids.get(&fid).ok_or("unknown fid")?;
+        (entry.path.clone(), entry.is_dir)
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
     let req = Request {
-        op: FsOperation::Unlink,
+        op: if is_dir {
+            FsOperation::RmDir
+        } else {
+            FsOperation::Unlink
+        },
         path,
         data: Bytes::new(),
         reply: reply_tx,
@@ -822,6 +921,139 @@ async fn handle_stat(
 
 async fn handle_flush(stream: &mut impl NinepStream, tag: u16) -> Result<(), String> {
     send_reply(stream, RFLUSH, tag, &[]).await;
+    Ok(())
+}
+
+// ── WStat handler (SetAttr / Rename) ─────────────────────────────────
+
+async fn handle_wstat(
+    shared: &Shared,
+    stream: &mut impl NinepStream,
+    tag: u16,
+    body: &[u8],
+) -> Result<(), String> {
+    if body.len() < 4 {
+        return Err("short wstat message".into());
+    }
+    let fid = u32::from_le_bytes(body[0..4].try_into().unwrap());
+
+    let (path, qid) = {
+        let state = shared.state.lock().await;
+        let entry = state.fids.get(&fid).cloned().ok_or("unknown fid")?;
+        (entry.path, entry.qid)
+    };
+
+    // Parse the stat data: size[2] data[size-2]
+    let stat_data = &body[4..];
+    if stat_data.len() < 2 {
+        return Err("short wstat data".into());
+    }
+    let stat_len = u16::from_le_bytes(stat_data[0..2].try_into().unwrap()) as usize;
+    let stat_data = &stat_data[2..2 + stat_len.min(stat_data.len() - 2)];
+
+    // Skip type(2) + dev(4)
+    if stat_data.len() < 6 {
+        send_reply(stream, RWSTAT, tag, &[]).await;
+        return Ok(());
+    }
+    let mut off = 6usize;
+
+    // qid(13) — WStat typically sends a zero qid or the file's qid; we ignore it.
+    off = off.saturating_add(13);
+
+    // mode(4)
+    let has_mode = stat_data.len() >= off + 4;
+    if has_mode {
+        off += 4;
+    }
+
+    // atime(4) + mtime(4) with old value all-1s check
+    let has_time = stat_data.len() >= off + 8;
+    if has_time {
+        off += 8;
+    }
+
+    // length(8) — non-zero = truncate
+    let has_length = stat_data.len() >= off + 8;
+    if has_length {
+        off += 8;
+    }
+
+    // name(2+n) — non-empty = rename
+    let mut new_name: Option<String> = None;
+    if stat_data.len() >= off + 2 {
+        let name_len = u16::from_le_bytes(stat_data[off..off + 2].try_into().unwrap()) as usize;
+        off += 2;
+        if name_len > 0 && off + name_len <= stat_data.len() {
+            let name_str = String::from_utf8_lossy(&stat_data[off..off + name_len]).to_string();
+            let current_name = path.rsplit('/').next().unwrap_or("");
+            if name_str != current_name && !name_str.is_empty() {
+                new_name = Some(name_str);
+            }
+        }
+    }
+
+    // Dispatch
+    if let Some(ref name) = new_name {
+        // Rename
+        let new_path = if path == "/" {
+            format!("/{name}")
+        } else {
+            let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("/");
+            if parent == "/" {
+                format!("/{name}")
+            } else {
+                format!("{parent}/{name}")
+            }
+        };
+        let data = Bytes::from(new_path.clone());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = Request {
+            op: FsOperation::Rename,
+            path: path.clone(),
+            data,
+            reply: reply_tx,
+        };
+        shared
+            .router_tx
+            .send(req)
+            .await
+            .map_err(|_| "router gone")?;
+        reply_rx
+            .await
+            .map_err(|_| "handler gone")?
+            .map_err(|e| format!("rename failed: {e}"))?;
+
+        // Update the path in the ninep state
+        let mut state = shared.state.lock().await;
+        if let Some(entry) = state.fids.get_mut(&fid) {
+            entry.path = new_path.clone();
+        }
+        state.paths.insert(qid, PathEntry {
+            path: new_path,
+            is_dir: false,
+        });
+    } else if has_mode || has_time || has_length {
+        // SetAttr (mode, time, or truncate)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = Request {
+            op: FsOperation::SetAttr,
+            path: path.clone(),
+            data: Bytes::new(),
+            reply: reply_tx,
+        };
+        shared
+            .router_tx
+            .send(req)
+            .await
+            .map_err(|_| "router gone")?;
+        reply_rx
+            .await
+            .map_err(|_| "handler gone")?
+            .map_err(|e| format!("setattr failed: {e}"))?;
+    }
+
+    send_reply(stream, RWSTAT, tag, &[]).await;
     Ok(())
 }
 
@@ -911,8 +1143,10 @@ async fn handle_udp_message(
         TREAD => handle_read(shared, &mut virt, tag, &data[7..]).await,
         TWRITE => handle_write(shared, &mut virt, tag, &data[7..]).await,
         TCLUNK => handle_clunk(shared, &mut virt, tag, &data[7..]).await,
+        TCREATE => handle_create(shared, &mut virt, tag, &data[7..]).await,
         TREMOVE => handle_remove(shared, &mut virt, tag, &data[7..]).await,
         TSTAT => handle_stat(shared, &mut virt, tag, &data[7..]).await,
+        TWSTAT => handle_wstat(shared, &mut virt, tag, &data[7..]).await,
         TFLUSH => handle_flush(&mut virt, tag).await,
         _ => {
             // Send Rlerror for unknown message types.

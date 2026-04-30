@@ -2,4 +2,5 @@
 
 pub mod fuse;
 pub mod ninep;
+pub mod ninep_client;
 pub mod sshfs;

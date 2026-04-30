@@ -490,6 +490,57 @@ impl NinepClient {
         self.recv_reply()?;
         Ok(())
     }
+
+    pub fn write(&mut self, tag: u16, fid: u32, offset: u64, data: &[u8]) -> Result<(), String> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&fid.to_le_bytes());
+        body.extend_from_slice(&offset.to_le_bytes());
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        self.send_msg(118, tag, &body)?;
+        self.recv_reply()?;
+        Ok(())
+    }
+
+    pub fn create(&mut self, tag: u16, fid: u32, name: &str, perm: u32, mode: u8) -> Result<(), String> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&fid.to_le_bytes());
+        body.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(&perm.to_le_bytes());
+        body.push(mode);
+        self.send_msg(114, tag, &body)?;
+        self.recv_reply()?;
+        Ok(())
+    }
+
+    pub fn remove_fid(&mut self, tag: u16, fid: u32) -> Result<(), String> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&fid.to_le_bytes());
+        self.send_msg(122, tag, &body)?;
+        self.recv_reply()?;
+        Ok(())
+    }
+
+    /// Walk to a path via a fresh fid then call Tcreate with DMDIR.
+    pub fn create_dir_9p(&mut self, path: &str) -> Result<(), String> {
+        let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("/");
+        let name = path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path);
+        let parent = if parent.is_empty() { "/" } else { parent };
+        let pfid = 3u32;
+        self.walk(0, 1, pfid, parent)?;
+        self.create(0, pfid, name, 0x800001ed, 0)?;
+        self.clunk(0, pfid)?;
+        Ok(())
+    }
+
+    /// Walk to a path then call Tremove.
+    pub fn remove_path(&mut self, path: &str) -> Result<(), String> {
+        let rfid = 3u32;
+        self.walk(0, 1, rfid, path)?;
+        self.remove_fid(0, rfid)?;
+        Ok(())
+    }
 }
 
 impl TestClient for NinepClient {
@@ -506,6 +557,51 @@ impl TestClient for NinepClient {
     fn walk_nonexistent(&mut self, path: &str) -> Result<String, String> {
         let err = self.walk(0, 1, 2, path).unwrap_err();
         Err(err)
+    }
+
+    fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
+        let wfid = 3u32;
+        self.walk(0, 1, wfid, path)?;
+        self.open(0, wfid)?;
+        self.write(0, wfid, 0, content.as_bytes())?;
+        self.clunk(0, wfid)?;
+        Ok(())
+    }
+
+    fn create_dir(&mut self, path: &str) -> Result<(), String> {
+        self.create_dir_9p(path)
+    }
+
+    fn remove(&mut self, path: &str) -> Result<(), String> {
+        self.remove_path(path)
+    }
+
+    fn read_dir_names(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let dir = if path.is_empty() || path == "/" { "/" } else { path.trim_end_matches('/') };
+        let dfid = 3u32;
+        self.walk(0, 1, dfid, dir)?;
+        self.open(0, dfid)?;
+        let resp = self.read(0, dfid, 0, 65536)?;
+        self.clunk(0, dfid)?;
+        let raw = read_data(&resp);
+        let mut names = Vec::new();
+        let mut off = 0;
+        while off + 2 <= raw.len() {
+            let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
+            if entry_size == 0 || off + entry_size > raw.len() { break; }
+            // stat entry: type(2) dev(4) qid(13) mode(4) atime(4) mtime(4) length(8) name[s]
+            let name_start = 6 + 13 + 4 + 4 + 4 + 8; // = 39
+            if entry_size < name_start + 2 { off += entry_size; continue; }
+            let name_len = u16::from_le_bytes(raw[off+name_start..off+name_start+2].try_into().unwrap()) as usize;
+            if name_start + 2 + name_len > entry_size { off += entry_size; continue; }
+            let name = String::from_utf8_lossy(&raw[off+name_start+2..off+name_start+2+name_len]).to_string();
+            if !name.is_empty() && name != "." && name != ".." {
+                names.push(name);
+            }
+            off += entry_size;
+        }
+        names.sort();
+        Ok(names)
     }
 }
 
@@ -615,6 +711,52 @@ impl UdpNinepClient {
         self.exchange(120, tag, &body)?;
         Ok(())
     }
+
+    pub fn write(&mut self, tag: u16, fid: u32, offset: u64, data: &[u8]) -> Result<(), String> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&fid.to_le_bytes());
+        body.extend_from_slice(&offset.to_le_bytes());
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        self.exchange(118, tag, &body)?;
+        Ok(())
+    }
+
+    pub fn create(&mut self, tag: u16, fid: u32, name: &str, perm: u32, mode: u8) -> Result<(), String> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&fid.to_le_bytes());
+        body.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(&perm.to_le_bytes());
+        body.push(mode);
+        self.exchange(114, tag, &body)?;
+        Ok(())
+    }
+
+    pub fn remove_fid(&mut self, tag: u16, fid: u32) -> Result<(), String> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&fid.to_le_bytes());
+        self.exchange(122, tag, &body)?;
+        Ok(())
+    }
+
+    pub fn create_dir_9p(&mut self, path: &str) -> Result<(), String> {
+        let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("/");
+        let name = path.rsplit_once('/').map(|(_, n)| n).unwrap_or(path);
+        let parent = if parent.is_empty() { "/" } else { parent };
+        let pfid = 3u32;
+        self.walk(0, 1, pfid, parent)?;
+        self.create(0, pfid, name, 0x800001ed, 0)?;
+        self.clunk(0, pfid)?;
+        Ok(())
+    }
+
+    pub fn remove_path(&mut self, path: &str) -> Result<(), String> {
+        let rfid = 3u32;
+        self.walk(0, 1, rfid, path)?;
+        self.remove_fid(0, rfid)?;
+        Ok(())
+    }
 }
 
 impl TestClient for UdpNinepClient {
@@ -631,6 +773,50 @@ impl TestClient for UdpNinepClient {
     fn walk_nonexistent(&mut self, path: &str) -> Result<String, String> {
         let err = self.walk(0, 1, 2, path).unwrap_err();
         Err(err)
+    }
+
+    fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
+        let wfid = 3u32;
+        self.walk(0, 1, wfid, path)?;
+        self.open(0, wfid)?;
+        self.write(0, wfid, 0, content.as_bytes())?;
+        self.clunk(0, wfid)?;
+        Ok(())
+    }
+
+    fn create_dir(&mut self, path: &str) -> Result<(), String> {
+        self.create_dir_9p(path)
+    }
+
+    fn remove(&mut self, path: &str) -> Result<(), String> {
+        self.remove_path(path)
+    }
+
+    fn read_dir_names(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let dir = if path.is_empty() || path == "/" { "/" } else { path.trim_end_matches('/') };
+        let dfid = 3u32;
+        self.walk(0, 1, dfid, dir)?;
+        self.open(0, dfid)?;
+        let resp = self.read(0, dfid, 0, 65536)?;
+        self.clunk(0, dfid)?;
+        let raw = read_data(&resp);
+        let mut names = Vec::new();
+        let mut off = 0;
+        while off + 2 <= raw.len() {
+            let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
+            if entry_size == 0 || off + entry_size > raw.len() { break; }
+            let name_start = 39;
+            if entry_size < name_start + 2 { off += entry_size; continue; }
+            let name_len = u16::from_le_bytes(raw[off+name_start..off+name_start+2].try_into().unwrap()) as usize;
+            if name_start + 2 + name_len > entry_size { off += entry_size; continue; }
+            let name = String::from_utf8_lossy(&raw[off+name_start+2..off+name_start+2+name_len]).to_string();
+            if !name.is_empty() && name != "." && name != ".." {
+                names.push(name);
+            }
+            off += entry_size;
+        }
+        names.sort();
+        Ok(names)
     }
 }
 
@@ -696,6 +882,50 @@ impl TestClient for SshClient {
             }
         };
         Err(err.message().to_string())
+    }
+
+    fn write_file(&mut self, path: &str, content: &str) -> Result<(), String> {
+        use std::path::Path;
+        let sftp = self.get_sftp()?;
+        let mut file = sftp
+            .create(Path::new(path))
+            .map_err(|e| format!("sftp create {path}: {e}"))?;
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("sftp write {path}: {e}"))?;
+        Ok(())
+    }
+
+    fn create_dir(&mut self, path: &str) -> Result<(), String> {
+        use std::path::Path;
+        let sftp = self.get_sftp()?;
+        sftp.mkdir(Path::new(path), 0o755)
+            .map_err(|e| format!("sftp mkdir {path}: {e}"))
+    }
+
+    fn remove(&mut self, path: &str) -> Result<(), String> {
+        use std::path::Path;
+        let sftp = self.get_sftp()?;
+        let p = Path::new(path);
+        if let Err(e) = sftp.unlink(p) {
+            sftp.rmdir(p).map_err(|e2| format!("sftp remove {path}: unlink: {e}, rmdir: {e2}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn read_dir_names(&mut self, path: &str) -> Result<Vec<String>, String> {
+        let sftp = self.get_sftp()?;
+        let dir_path = if path.is_empty() || path == "/" { "." } else { path.trim_end_matches('/') };
+        let entries = sftp
+            .readdir(dir_path)
+            .map_err(|e| format!("sftp readdir {dir_path}: {e}"))?;
+        let mut names: Vec<String> = entries
+            .into_iter()
+            .map(|(name, _)| name.to_string_lossy().to_string())
+            .filter(|n| n != "." && n != "..")
+            .collect();
+        names.sort();
+        Ok(names)
     }
 }
 

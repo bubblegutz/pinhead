@@ -267,12 +267,20 @@ impl SftpSession {
         &mut self,
         id: u32,
         filename: String,
-        _pflags: OpenFlags,
+        pflags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, StatusCode> {
-        self.route(FsOperation::Open, &filename, Bytes::new())
-            .await
-            .map_err(|_| StatusCode::Failure)?;
+        use std::ops::BitOr;
+        let creat = OpenFlags::CREATE;
+        if (pflags.bits() & creat.bits()) != 0 {
+            self.route(FsOperation::Create, &filename, Bytes::new())
+                .await
+                .map_err(|_| StatusCode::Failure)?;
+        } else {
+            self.route(FsOperation::Open, &filename, Bytes::new())
+                .await
+                .map_err(|_| StatusCode::Failure)?;
+        }
         let handle = self.handles.alloc(&filename, false);
         Ok(Handle { id, handle })
     }
@@ -461,15 +469,24 @@ impl SftpSession {
     async fn rename(
         &mut self,
         id: u32,
-        _oldpath: String,
-        _newpath: String,
+        oldpath: String,
+        newpath: String,
     ) -> Result<Status, StatusCode> {
-        Ok(Status {
-            id,
-            status_code: StatusCode::OpUnsupported,
-            error_message: "rename not supported".to_string(),
-            language_tag: "en".to_string(),
-        })
+        let data = Bytes::from(newpath.clone());
+        match self.route(FsOperation::Rename, &oldpath, data).await {
+            Ok(_) => Ok(Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: String::new(),
+                language_tag: String::new(),
+            }),
+            Err(e) => Ok(Status {
+                id,
+                status_code: StatusCode::Failure,
+                error_message: e,
+                language_tag: "en".to_string(),
+            }),
+        }
     }
 
     /// Route a pinhead request and return the response data.
@@ -691,8 +708,36 @@ where
             }
 
             // Unsupported operations → OpUnsupported
-            Packet::SetStat(req) => make_status(req.id, StatusCode::OpUnsupported),
-            Packet::FSetStat(req) => make_status(req.id, StatusCode::OpUnsupported),
+            Packet::SetStat(req) => {
+                match handler
+                    .route(FsOperation::SetAttr, &req.path, Bytes::new())
+                    .await
+                {
+                    Ok(_) => Packet::Status(Status {
+                        id: req.id,
+                        status_code: StatusCode::Ok,
+                        error_message: String::new(),
+                        language_tag: String::new(),
+                    }),
+                    Err(_) => make_status(req.id, StatusCode::Failure),
+                }
+            }
+            Packet::FSetStat(req) => {
+                let path = handler
+                    .handles
+                    .get(&req.handle)
+                    .map(|e| e.path.clone())
+                    .unwrap_or_default();
+                match handler.route(FsOperation::SetAttr, &path, Bytes::new()).await {
+                    Ok(_) => Packet::Status(Status {
+                        id: req.id,
+                        status_code: StatusCode::Ok,
+                        error_message: String::new(),
+                        language_tag: String::new(),
+                    }),
+                    Err(_) => make_status(req.id, StatusCode::Failure),
+                }
+            }
             Packet::ReadLink(req) => make_status(req.id, StatusCode::OpUnsupported),
             Packet::Symlink(req) => make_status(req.id, StatusCode::OpUnsupported),
 
