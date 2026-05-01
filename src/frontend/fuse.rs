@@ -109,6 +109,7 @@ impl FuseFilesystem {
     }
 
     fn send_req(&self, op: FsOperation, path: &str, data: Bytes) -> Result<Bytes, String> {
+        eprintln!("fuse send_req op={} path={}", op.as_str(), path);
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = Request {
             op,
@@ -318,15 +319,8 @@ impl Filesystem for FuseFilesystem {
         reply.ok();
     }
 
-    fn open(&self, _req: &FuseRequest, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let path = match self.path_for(ino.0) {
-            Some(p) => p,
-            None => return reply.error(Errno::ENOENT),
-        };
-        match self.send_req(FsOperation::Open, &path, Bytes::new()) {
-            Ok(_) => reply.opened(FileHandle(0), FopenFlags::empty()),
-            Err(_) => reply.error(Errno::EIO),
-        }
+    fn open(&self, _req: &FuseRequest, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        reply.opened(FileHandle(0), FopenFlags::empty());
     }
 
     fn read(
@@ -460,24 +454,9 @@ impl Filesystem for FuseFilesystem {
         let parent_path = self.path_for(parent.0).unwrap_or_else(|| "/".into());
         let path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
 
-        match self.send_req(FsOperation::Create, &path, Bytes::new()) {
-            Ok(_) => {
-                let (is_dir, size) = match self.send_req(FsOperation::GetAttr, &path, Bytes::new()) {
-                    Ok(data) => parse_attr(&data),
-                    Err(_) => (false, 0),
-                };
-                let ino = self.next_ino();
-                self.record_path(ino, path);
-                reply.created(
-                    &TTL,
-                    &self.file_attr(ino, size, is_dir),
-                    Generation(0),
-                    FileHandle(0),
-                    FopenFlags::empty(),
-                );
-            }
-            Err(_) => reply.error(Errno::EIO),
-        }
+        let ino = self.next_ino();
+        self.record_path(ino, path);
+        reply.created(&TTL, &self.file_attr(ino, 0, false), Generation(0), FileHandle(0), FopenFlags::empty());
     }
 
     fn mkdir(
