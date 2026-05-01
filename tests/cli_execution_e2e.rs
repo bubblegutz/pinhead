@@ -41,7 +41,7 @@ fn test_shebang_execution() {
     let full_script = format!("{}{}", SHEBANG_SCRIPT, MINIMAL_SCRIPT);
     fs::write(&script_path, &full_script).expect("write shebang script");
 
-    let binary = std::env!("CARGO_BIN_EXE_pinhead");
+    let binary = std::env!("CARGO_BIN_EXE_ph");
     let mut child = Command::new(binary)
         .arg(&script_path)
         .env("PINHEAD_LISTEN", format!("sock:{}", sock_path))
@@ -72,7 +72,7 @@ fn test_piped_execution() {
     let id = unique_id();
     let sock_path = format!("/tmp/pinhead-e2e-pipe-{:x}.sock", id);
 
-    let binary = std::env!("CARGO_BIN_EXE_pinhead");
+    let binary = std::env!("CARGO_BIN_EXE_ph");
     let mut child = Command::new(binary)
         .env("PINHEAD_LISTEN", format!("sock:{}", sock_path))
         .stdin(Stdio::piped())
@@ -128,7 +128,7 @@ ninep.listen(a)
     );
 
     let sock = format!("sock:{}", sock_path);
-    let binary = std::env!("CARGO_BIN_EXE_pinhead");
+    let binary = std::env!("CARGO_BIN_EXE_ph");
     let mut child = Command::new(binary)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

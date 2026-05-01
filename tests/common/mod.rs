@@ -122,7 +122,7 @@ impl PinheadInstance {
         fs::write(&script_path, script).map_err(|e| format!("write script: {e}"))?;
 
         let listen_val = transport.listen_str();
-        let binary = std::env!("CARGO_BIN_EXE_pinhead");
+        let binary = std::env!("CARGO_BIN_EXE_ph");
         let mut cmd = Command::new(binary);
         cmd.arg(&script_path)
             .stdout(Stdio::null())
