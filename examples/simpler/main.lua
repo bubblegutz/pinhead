@@ -40,7 +40,7 @@ route.read("/files/nested/deep.txt", function()
 end)
 
 -- Wildcard create — {path} catches any /uploads/<name>
-route.create("/uploads/{path}", function(params, data)
+route.create("/uploads/{path}", function(params, _)
     local filename = params.path or "unknown"
     return "Created upload file: " .. filename .. "\n" ..
            "Path: /uploads/" .. filename .. "\n" ..

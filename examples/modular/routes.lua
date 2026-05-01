@@ -62,7 +62,7 @@ function routes.get_user(params)
     return "User not found"
 end
 
-function routes.create_user(params, data)
+function routes.create_user(_, data)
     local name = data:match("name=([^&]+)") or "Unknown"
     local email = data:match("email=([^&]+)") or ""
 
@@ -108,7 +108,7 @@ function routes.get_product(params)
     return "Product not found"
 end
 
-function routes.create_product(params, data)
+function routes.create_product(_, data)
     local name = data:match("name=([^&]+)") or "New Product"
     local price = tonumber(data:match("price=([^&]+)")) or 0
     local stock = tonumber(data:match("stock=([^&]+)")) or 0

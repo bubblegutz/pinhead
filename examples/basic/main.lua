@@ -3,31 +3,31 @@
 -- A minimal filesystem for end-to-end testing through the 9P frontend.
 -- Exposes a single file `/testfile.txt` and root directory listing.
 
-route.register("/", {"lookup", "getattr", "open", "release"}, function(params, data)
+route.register("/", {"lookup", "getattr", "open", "release"}, function(_, _)
     return "root"
 end)
 
-route.register("/testfile.txt", "lookup", function(params, data)
+route.register("/testfile.txt", "lookup", function(_, _)
     return "found testfile.txt"
 end)
 
-route.register("/testfile.txt", "getattr", function(params, data)
+route.register("/testfile.txt", "getattr", function(_, _)
     return 'mode=file size=27'
 end)
 
-route.register("/testfile.txt", "open", function(params, data)
+route.register("/testfile.txt", "open", function(_, _)
     return "opened"
 end)
 
-route.register("/testfile.txt", "release", function(params, data)
+route.register("/testfile.txt", "release", function(_, _)
     return "released"
 end)
 
-route.register("/testfile.txt", "read", function(params, data)
+route.register("/testfile.txt", "read", function(_, _)
     return "hello from pinhead test!"
 end)
 
-route.default(function(params, data)
+route.default(function(_, _)
     return "unmatched"
 end)
 

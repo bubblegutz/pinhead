@@ -49,7 +49,7 @@ function config.register_custom_routes()
         end
     end)
 
-    route.write("/api/echo", function(params, data)
+    route.write("/api/echo", function(_, data)
         return "Echo (from custom route): " .. (data or "")
     end)
 end

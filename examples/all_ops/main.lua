@@ -35,56 +35,56 @@ worker.ttl(60)
 -- ── Route registrations — every operation type ────────────────────────
 
 -- Read a file
-route.read("/readme", function(params, data)
+route.read("/readme", function(_, _)
     return "read ok"
 end)
 
 -- Write to a file
-route.write("/writeme", function(params, data)
+route.write("/writeme", function(_, _)
     return "write ok"
 end)
 
 -- Create a new file (touch)
-route.create("/createme", function(params, data)
+route.create("/createme", function(_, _)
     return "create ok"
 end)
 
 -- Make a directory
-route.mkdir("/newdir", function(params, data)
+route.mkdir("/newdir", function(_, _)
     return "mkdir ok"
 end)
 
 -- Unlink / remove a file
-route.unlink("/deleteme", function(params, data)
+route.unlink("/deleteme", function(_, _)
     return "unlink ok"
 end)
 
 -- Read directory contents
-route.readdir("/dir", function(params, data)
+route.readdir("/dir", function(_, _)
     return "file1\nfile2\n"
 end)
 
 -- Lookup (check existence)
-route.lookup("/lookupme", function(params, data)
+route.lookup("/lookupme", function(_, _)
     return "lookup ok"
 end)
 
 -- Get attributes
-route.getattr("/getattrme", function(params, data)
+route.getattr("/getattrme", function(_, _)
     return "getattr ok"
 end)
 
 -- Open (prelude to read/write)
-route.open("/openme", function(params, data)
+route.open("/openme", function(_, _)
     return "open ok"
 end)
 
 -- Release (close)
-route.release("/releaseme", function(params, data)
+route.release("/releaseme", function(_, _)
     return "release ok"
 end)
 
 -- Catch-all handler for any other operation
-route.default(function(params, data)
+route.default(function(params, _)
     return "default handler: " .. (params.path or "?")
 end)

@@ -160,7 +160,7 @@ route.register("/{*rest}", "fsync", function() return "" end)
 route.register("/{*rest}", "fsyncdir", function() return "" end)
 
 -- Default handler for unmatched paths (shouldn't happen with wildcard).
-route.default(function(params, data)
+route.default(function(_, _)
     return ""
 end)
 

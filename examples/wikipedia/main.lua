@@ -179,7 +179,7 @@ local state = {
 }
 
 -- Route: write to /search triggers a search
-route.write("/search", function(params, data)
+route.write("/search", function(_, data)
     if data == nil then return "" end
     local query = data:gsub("%s+$", ""):gsub("^%s+", "")
     if query == "" then
@@ -204,7 +204,7 @@ route.write("/search", function(params, data)
 end)
 
 -- Directory listing for /result
-route.readdir("/result", function(params, data)
+route.readdir("/result", function(_, _)
     local files = {}
     for title, _ in pairs(state.search_results) do
         local filename = title:gsub("[ /]", "_") .. ".md"
@@ -214,7 +214,7 @@ route.readdir("/result", function(params, data)
 end)
 
 -- Read a search result article (markdown)
-route.read("/result/{title}.md", function(params, data)
+route.read("/result/{title}.md", function(params, _)
     local title = params.title
     if not title then
         return "Error: could not determine article title"
@@ -240,7 +240,7 @@ route.read("/result/{title}.md", function(params, data)
 end)
 
 -- Directory listing for article links
-route.readdir("/article/{title}/links", function(params, data)
+route.readdir("/article/{title}/links", function(params, _)
     local title = params.title
     if not title then
         return {}
@@ -260,7 +260,7 @@ route.readdir("/article/{title}/links", function(params, data)
 end)
 
 -- Read a specific link (lazy fetch)
-route.read("/article/{title}/links/{link_id}", function(params, data)
+route.read("/article/{title}/links/{link_id}", function(params, _)
     local title = params.title
     if not title then
         return "Error: could not determine article title"
@@ -308,7 +308,7 @@ route.write("/bookmarks/{path}", function(params, data)
 end)
 
 -- Read a bookmark file
-route.read("/bookmarks/{path}", function(params, data)
+route.read("/bookmarks/{path}", function(params, _)
     local virtual_path = params.path
     if not virtual_path then
         return "Error: could not determine bookmark path"
@@ -321,7 +321,7 @@ route.read("/bookmarks/{path}", function(params, data)
 end)
 
 -- Create a bookmark directory (create operation)
-route.register("/bookmarks/{path}", {"lookup", "getattr", "create"}, function(params, data)
+route.register("/bookmarks/{path}", {"lookup", "getattr", "create"}, function(params, _)
     local virtual_path = params.path
     if not virtual_path then
         return "Error: could not determine bookmark path"
@@ -342,7 +342,7 @@ route.register("/bookmarks/{path}", {"lookup", "getattr", "create"}, function(pa
 end)
 
 -- Remove a bookmark or directory
-route.unlink("/bookmarks/{path}", function(params, data)
+route.unlink("/bookmarks/{path}", function(params, _)
     local virtual_path = params.path
     if not virtual_path then
         return "Error: could not determine bookmark path"
@@ -367,18 +367,18 @@ route.unlink("/bookmarks/{path}", function(params, data)
 end)
 
 -- List bookmarks directory
-route.readdir("/bookmarks/{path}", function(params, data)
+route.readdir("/bookmarks/{path}", function(params, _)
     local virtual_path = params.path or ""
     return list_bookmarks(virtual_path)
 end)
 
 -- Root directory listing
-route.readdir("/", function(params, data)
+route.readdir("/", function(_, _)
     return "search\nresult/\narticle/\nbookmarks/\nREADME.md"
 end)
 
 -- README file
-route.read("/README.md", function(params, data)
+route.read("/README.md", function(_, _)
     return [[# Wikipedia Example
 
 This example demonstrates a Wikipedia client using pinhead's virtual filesystem.

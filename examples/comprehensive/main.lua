@@ -236,7 +236,7 @@ Request Failed: %s
 end)
 
 -- ── Default handler for unmatched paths ───────────────────────────────────
-route.default(function(params, data)
+route.default(function(params, _)
     local path = params["path"] or "unknown"
     return "Unmatched path: " .. path
 end)

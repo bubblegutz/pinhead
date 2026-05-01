@@ -88,6 +88,6 @@ route.getattr("/files/{path}", function(_params, _data)
 end)
 
 -- Default handler for unmatched paths.
-route.default(function(params, data)
+route.default(function(_, _)
     return "unmatched path"
 end)

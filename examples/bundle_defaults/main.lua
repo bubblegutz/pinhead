@@ -7,63 +7,63 @@
 -- with distinct output so you can see which handler matched.
 
 -- Read bundle: lookup + getattr + open + read + release + flush
-route.read("/docs/{name}", function(params, data)
+route.read("/docs/{name}", function(params, _)
     return "Document: " .. params["name"]
 end)
-route.read.default(function(params, data)
+route.read.default(function(params, _)
     return "Default read: " .. params["path"]
 end)
 
 -- Write bundle: lookup + getattr + open + read + write + release + flush + fsync
-route.write("/notes/{name}", function(params, data)
+route.write("/notes/{name}", function(params, _)
     return "Note: " .. params["name"]
 end)
-route.write.default(function(params, data)
+route.write.default(function(params, _)
     return "Default write: " .. params["path"]
 end)
 
 -- Readdir bundle: lookup + getattr + opendir + readdir + releasedir
-route.readdir("/users/{id}", function(params, data)
+route.readdir("/users/{id}", function(params, _)
     return "User: " .. params["id"]
 end)
-route.readdir.default(function(params, data)
+route.readdir.default(function(params, _)
     return "Default readdir: " .. params["path"]
 end)
 
 -- Create bundle: lookup + getattr + create + open + read + write + release + flush
-route.create("/sessions/{id}", function(params, data)
+route.create("/sessions/{id}", function(params, _)
     return "Session: " .. params["id"]
 end)
-route.create.default(function(params, data)
+route.create.default(function(params, _)
     return "Default create: " .. params["path"]
 end)
 
 -- Unlink bundle: unlink + lookup + getattr
-route.unlink("/trash/{name}", function(params, data)
+route.unlink("/trash/{name}", function(params, _)
     return "Trash: " .. params["name"]
 end)
-route.unlink.default(function(params, data)
+route.unlink.default(function(params, _)
     return "Default unlink: " .. params["path"]
 end)
 
 -- Mkdir bundle: mkdir + lookup + getattr + opendir + readdir + releasedir
-route.mkdir("/projects/{name}", function(params, data)
+route.mkdir("/projects/{name}", function(params, _)
     return "Project: " .. params["name"]
 end)
-route.mkdir.default(function(params, data)
+route.mkdir.default(function(params, _)
     return "Default mkdir: " .. params["path"]
 end)
 
 -- Lookup bundle: single op
-route.lookup("/api/{version}", function(params, data)
+route.lookup("/api/{version}", function(params, _)
     return "API v" .. params["version"]
 end)
-route.lookup.default(function(params, data)
+route.lookup.default(function(params, _)
     return "Default lookup: " .. params["path"]
 end)
 
 -- Global default: ops not covered by any bundle default
-route.default(function(params, data)
+route.default(function(params, _)
     return "Global default: unmatched"
 end)
 
