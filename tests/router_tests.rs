@@ -10,6 +10,7 @@ use pinhead::router;
 /// Wrapper: build a RouteMeta with a wildcard ("*") handler.
 fn wildcard_handler(name: &str) -> pinhead::router::RouteMeta {
     pinhead::router::RouteMeta {
+        pattern: "/".to_string(),
         handlers: HashMap::from([("*".to_string(), name.to_string())]),
     }
 }
@@ -30,7 +31,7 @@ async fn test_single_route_lookup() {
             let body = format!("handler={} params={:?}", req.handler_name, req.params);
             let _ = req
                 .reply
-                .send(Ok(HandlerResponse { data: Bytes::from(body) }));
+                .send(Ok(HandlerResponse { data: Bytes::from(body), matched_pattern: None, has_children: false }));
         }
     });
 
@@ -68,7 +69,7 @@ async fn test_route_params() {
             let body = format!("params={:?}", req.params);
             let _ = req
                 .reply
-                .send(Ok(HandlerResponse { data: Bytes::from(body) }));
+                .send(Ok(HandlerResponse { data: Bytes::from(body), matched_pattern: None, has_children: false }));
         }
     });
 
@@ -106,7 +107,7 @@ async fn test_wildcard_route() {
             let body = format!("params={:?}", req.params);
             let _ = req
                 .reply
-                .send(Ok(HandlerResponse { data: Bytes::from(body) }));
+                .send(Ok(HandlerResponse { data: Bytes::from(body), matched_pattern: None, has_children: false }));
         }
     });
 
@@ -168,7 +169,7 @@ async fn test_concurrent_requests() {
             let body = format!("OK {}", req.handler_name);
             let _ = req
                 .reply
-                .send(Ok(HandlerResponse { data: Bytes::from(body) }));
+                .send(Ok(HandlerResponse { data: Bytes::from(body), matched_pattern: None, has_children: false }));
         }
     });
 

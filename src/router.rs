@@ -18,6 +18,7 @@ pub struct RouteMeta {
     /// Operation → handler-name map.
     /// Key `"*"` = handles all operations (wildcard).
     pub handlers: HashMap<String, String>,
+    pub pattern: String,
 }
 
 /// A request sent from a frontend (FUSE / 9p) to the router task.
@@ -143,6 +144,14 @@ async fn dispatch(
     };
 
     let meta = matched.value.clone();
+    let matched_pattern = meta.pattern.clone();
+    let has_children = {
+        let probe = format!("{path}/x");
+        match inner.trie.at(&probe) {
+            Ok(m) => m.value.pattern != matched_pattern && !m.value.pattern.contains('*'),
+            Err(_) => false,
+        }
+    };
 
     // Select the handler_name based on the operation.
     let handler_name = meta.handlers.get(op.as_str()).or_else(|| {
@@ -168,6 +177,18 @@ async fn dispatch(
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
 
+    if has_children {
+        use crate::fsop::FsOperation;
+        match op {
+            FsOperation::Open | FsOperation::Read | FsOperation::Write | FsOperation::Release => {
+                let msg = format!("is a directory: `{path}`");
+                let _ = req.reply.send(Err(msg));
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     // 2. Build a handler request.
     let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -186,8 +207,14 @@ async fn dispatch(
 
     // 4. Wait for the handler's response and forward it.
     match reply_rx.await {
-        Ok(result) => {
-            let _ = req.reply.send(result);
+        Ok(Ok(mut resp)) => {
+            resp.matched_pattern = Some(matched_pattern);
+            resp.has_children = has_children;
+            let _ = req.reply.send(Ok(resp));
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            let _ = req.reply.send(Err(e));
             Ok(())
         }
         Err(_) => {

@@ -26,6 +26,8 @@ pub struct HandlerRequest {
 #[derive(Debug)]
 pub struct HandlerResponse {
     pub data: Bytes,
+    pub matched_pattern: Option<String>,
+    pub has_children: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +625,8 @@ end
 
         Ok(HandlerResponse {
             data: Bytes::from(result),
+            matched_pattern: None,
+            has_children: false,
         })
     }
 

@@ -52,6 +52,7 @@ async fn main() {
         let meta = pattern_map
             .entry(&r.pattern)
             .or_insert_with(|| RouteMeta {
+                pattern: r.pattern.clone(),
                 handlers: HashMap::new(),
             });
         if r.ops.is_empty() {

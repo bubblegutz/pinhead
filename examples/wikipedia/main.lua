@@ -18,15 +18,16 @@ local cwd = __pinhead_cwd or "."
 local bookmarks_db = doc.open(cwd .. "/bookmarks.db")
 
 -- Transport configuration — override via env vars for e2e tests
-local listen_addr = env.get("PINHEAD_LISTEN") or "sock:/tmp/wikipedia.sock"
-local ssh_listen = env.get("PINHEAD_SSH_LISTEN") or "127.0.0.1:2222"
-local fuse_mount = env.get("PINHEAD_FUSE_MOUNT")
-
-ninep.listen(listen_addr)
-sshfs.userpasswd("alice", "hunter2")
-sshfs.listen(ssh_listen)
-if fuse_mount then
-    fuse.mount(fuse_mount)
+if env.get("PINHEAD_LISTEN") then
+    ninep.listen(env.get("PINHEAD_LISTEN"))
+elseif env.get("PINHEAD_SSH_LISTEN") then
+    sshfs.listen(env.get("PINHEAD_SSH_LISTEN"))
+elseif env.get("PINHEAD_FUSE_MOUNT") then
+    fuse.mount(env.get("PINHEAD_FUSE_MOUNT"))
+else
+    -- ninep.listen("sock:/tmp/pinhead.sock")
+    -- sshfs.listen("127.0.0.1:2222")
+    -- fuse.mount("/tmp/pinhead")
 end
 
 -- Helper: list bookmark keys matching a virtual directory prefix.

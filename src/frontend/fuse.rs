@@ -158,10 +158,9 @@ impl Filesystem for FuseFilesystem {
                 let ino = self.next_ino();
                 self.record_path(ino, path.clone());
                 // Try getattr for accurate size; fall back to content length.
-                let (is_dir, size) = match self.send_req(FsOperation::GetAttr, &path, Bytes::new()) {
+                let (parsed_is_dir, size) = match self.send_req(FsOperation::GetAttr, &path, Bytes::new()) {
                     Ok(attr_data) => {
                         let (d, s) = parse_attr(&attr_data);
-                        // getattr returned content (no size= token) — use length
                         if s == 0 && !attr_data.is_empty() && parse_attr_size(&attr_data).is_none() {
                             (false, attr_data.len() as u64)
                         } else {
@@ -169,6 +168,12 @@ impl Filesystem for FuseFilesystem {
                         }
                     }
                     Err(_) => (false, data.len() as u64),
+                };
+                let is_dir = if !parsed_is_dir {
+                    let probe = format!("{}/x", path);
+                    probe != path && path != "/" && self.send_req(FsOperation::Lookup, &probe, Bytes::new()).is_ok()
+                } else {
+                    true
                 };
                 reply.entry(&TTL, &self.file_attr(ino, size, is_dir), Generation(0));
             }
