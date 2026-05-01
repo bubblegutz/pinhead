@@ -63,7 +63,7 @@ impl FuseFilesystem {
         Self {
             tx,
             ino_next: AtomicU64::new(2),
-            paths: Mutex::new(HashMap::new()),
+            paths: Mutex::new(HashMap::from([(1, "/".to_string())])),
             root_attr,
             runtime: tokio::runtime::Handle::current(),
         }
@@ -293,7 +293,11 @@ impl Filesystem for FuseFilesystem {
                         line.to_string()
                     };
                     if !name.is_empty() {
-                        v.push((INodeNo(self.next_ino()), FileType::RegularFile, name));
+                        let kind = if name.ends_with('/') { FileType::Directory } else { FileType::RegularFile };
+                        let clean = name.trim_end_matches('/');
+                        let e_ino = self.next_ino();
+                        self.record_path(e_ino, format!("{}/{}", path.trim_end_matches('/'), clean));
+                        v.push((INodeNo(e_ino), kind, clean.to_string()));
                     }
                 }
             }

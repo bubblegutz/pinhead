@@ -57,7 +57,7 @@ local function list_bookmarks(prefix)
             end
         end
     end
-    return results
+    return table.concat(results, "\n")
 end
 local function url_encode(str)
     if str == nil then return "" end
@@ -210,7 +210,7 @@ route.readdir("/result", function(params, data)
         local filename = title:gsub("[ /]", "_") .. ".md"
         table.insert(files, filename)
     end
-    return files
+    return table.concat(files, "\n")
 end)
 
 -- Read a search result article (markdown)
@@ -256,7 +256,7 @@ route.readdir("/article/{title}/links", function(params, data)
     for i = 1, #links do
         table.insert(files, tostring(i))
     end
-    return files
+    return table.concat(files, "\n")
 end)
 
 -- Read a specific link (lazy fetch)
@@ -369,19 +369,12 @@ end)
 -- List bookmarks directory
 route.readdir("/bookmarks/{path}", function(params, data)
     local virtual_path = params.path or ""
-    local results = list_bookmarks(virtual_path)
-    return results
+    return list_bookmarks(virtual_path)
 end)
 
 -- Root directory listing
 route.readdir("/", function(params, data)
-    return {
-        "search",
-        "result/",
-        "article/",
-        "bookmarks/",
-        "README.md"
-    }
+    return "search\nresult/\narticle/\nbookmarks/\nREADME.md"
 end)
 
 -- README file

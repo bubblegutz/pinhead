@@ -189,6 +189,7 @@ async fn dispatch(
         }
     }
 
+    eprintln!("router dispatch op={} path={} handler={}", op.as_str(), path, handler_name);
     // 2. Build a handler request.
     let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -199,11 +200,13 @@ async fn dispatch(
         reply: reply_tx,
     };
 
+    eprintln!("router: sending to handler op={} path={}", op.as_str(), path);
     // 3. Send to the handler task.
     handler_tx
         .send(hreq)
         .await
         .map_err(|_| "handler task is gone".to_string())?;
+    eprintln!("router: sent ok");
 
     // 4. Wait for the handler's response and forward it.
     match reply_rx.await {

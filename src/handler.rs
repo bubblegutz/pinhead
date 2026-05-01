@@ -226,10 +226,10 @@ do
     end
 
     route.write = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
     end })
     route.write.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
     end
 
     route.readdir = setmetatable({}, { __call = function(_, path, func)
@@ -766,10 +766,10 @@ do
     end
 
     route.write = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
     end })
     route.write.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync"}, func)
+        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
     end
 
     route.readdir = setmetatable({}, { __call = function(_, path, func)
