@@ -382,13 +382,19 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |_, path: String| {
-                let mut r = reg.lock().map_err(|_| {
-                    mlua::Error::RuntimeError("registry lock poisoned".into())
-                })?;
-                let h = r
-                    .open(&path, Some("CREATE TABLE IF NOT EXISTS docs (key TEXT PRIMARY KEY, value TEXT)"))
-                    .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
-                Ok(h.id as i64)
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<i64, mlua::Error> {
+                    let mut r = reg.lock().map_err(|_| {
+                        mlua::Error::RuntimeError("registry lock poisoned".into())
+                    })?;
+                    let h = r
+                        .open(&path, Some("CREATE TABLE IF NOT EXISTS docs (key TEXT PRIMARY KEY, value TEXT)"))
+                        .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
+                    Ok(h.id as i64)
+                }));
+                match r {
+                    Ok(v) => v,
+                    Err(_) => Ok(0),
+                }
             })
             .map_err(|e| format!("{e}"))?;
         t.set("open", fn_).map_err(|e| format!("{e}"))?;
@@ -415,13 +421,17 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |lua, (handle_id, key, value): (i64, String, mlua::Value)| {
-                let h = get_handle(&reg, handle_id)?;
-                let json = map_err(crate::serialize::json_encode(lua, value))?;
-                map_err(send_exec_writer(
-                    &h.write_tx,
-                    "INSERT INTO docs (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    vec![Param::Text(key), Param::Text(json)],
-                ))?;
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), mlua::Error> {
+                    let h = get_handle(&reg, handle_id)?;
+                    let json = map_err(crate::serialize::json_encode(lua, value))?;
+                    map_err(send_exec_writer(
+                        &h.write_tx,
+                        "INSERT INTO docs (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        vec![Param::Text(key), Param::Text(json)],
+                    ))?;
+                    Ok(())
+                }));
+                let _ = r;
                 Ok(())
             })
             .map_err(|e| format!("{e}"))?;
@@ -433,18 +443,24 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |lua, (handle_id, key): (i64, String)| {
-                let h = get_handle(&reg, handle_id)?;
-                let row = map_err(send_row_reader(
-                    &h.read_tx,
-                    "SELECT value FROM docs WHERE key = ?1",
-                    vec![Param::Text(key)],
-                ))?;
-                match row.and_then(|r| r.get("value").cloned()) {
-                    Some(Value::Text(s)) => {
-                        let val = map_err(crate::serialize::json_decode(lua, s))?;
-                        Ok(val)
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<mlua::Value, mlua::Error> {
+                    let h = get_handle(&reg, handle_id)?;
+                    let row = map_err(send_row_reader(
+                        &h.read_tx,
+                        "SELECT value FROM docs WHERE key = ?1",
+                        vec![Param::Text(key)],
+                    ))?;
+                    match row.and_then(|r| r.get("value").cloned()) {
+                        Some(Value::Text(s)) => {
+                            let val = map_err(crate::serialize::json_decode(lua, s))?;
+                            Ok(val)
+                        }
+                        _ => Ok(mlua::Value::Nil),
                     }
-                    _ => Ok(mlua::Value::Nil),
+                }));
+                match r {
+                    Ok(v) => v,
+                    Err(_) => Ok(mlua::Value::Nil),
                 }
             })
             .map_err(|e| format!("{e}"))?;
@@ -456,12 +472,16 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |_, (handle_id, key): (i64, String)| {
-                let h = get_handle(&reg, handle_id)?;
-                map_err(send_exec_writer(
-                    &h.write_tx,
-                    "DELETE FROM docs WHERE key = ?1",
-                    vec![Param::Text(key)],
-                ))?;
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), mlua::Error> {
+                    let h = get_handle(&reg, handle_id)?;
+                    map_err(send_exec_writer(
+                        &h.write_tx,
+                        "DELETE FROM docs WHERE key = ?1",
+                        vec![Param::Text(key)],
+                    ))?;
+                    Ok(())
+                }));
+                let _ = r;
                 Ok(())
             })
             .map_err(|e| format!("{e}"))?;
@@ -540,13 +560,19 @@ fn register_sql_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |_, path: String| {
-                let mut r = reg.lock().map_err(|_| {
-                    mlua::Error::RuntimeError("registry lock poisoned".into())
-                })?;
-                let h = r
-                    .open(&path, None)
-                    .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
-                Ok(h.id as i64)
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<i64, mlua::Error> {
+                    let mut r = reg.lock().map_err(|_| {
+                        mlua::Error::RuntimeError("registry lock poisoned".into())
+                    })?;
+                    let h = r
+                        .open(&path, None)
+                        .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
+                    Ok(h.id as i64)
+                }));
+                match r {
+                    Ok(v) => v,
+                    Err(_) => Ok(0),
+                }
             })
             .map_err(|e| format!("{e}"))?;
         t.set("open", fn_).map_err(|e| format!("{e}"))?;
@@ -590,11 +616,17 @@ fn register_sql_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let fn_ = lua
             .create_function(
                 move |lua, (handle_id, sql, params_val): (i64, String, mlua::Value)| {
-                    let h = get_handle(&reg, handle_id)?;
-                    let params = lua_value_to_params(params_val);
-                    let rows = map_err(send_query_reader(&h.read_tx, &sql, params))?;
-                    let result = map_err(sql_rows_to_lua(lua, &rows))?;
-                    Ok(result)
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<mlua::Value, mlua::Error> {
+                        let h = get_handle(&reg, handle_id)?;
+                        let params = lua_value_to_params(params_val);
+                        let rows = map_err(send_query_reader(&h.read_tx, &sql, params))?;
+                        let result = map_err(sql_rows_to_lua(lua, &rows))?;
+                        Ok(result)
+                    }));
+                    match r {
+                        Ok(v) => v,
+                        Err(_) => Ok(mlua::Value::Nil),
+                    }
                 },
             )
             .map_err(|e| format!("{e}"))?;

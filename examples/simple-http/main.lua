@@ -1,8 +1,8 @@
 -- simple_http_test.lua — minimal HTTP request to test SSH transport
 route.register("/data", {"lookup", "getattr", "read", "open", "release"}, function()
-    local ok, res = pcall(req.get, "http://example.com/")
-    if not ok then
-        return "HTTP Error: " .. tostring(res)
+    local res = req.get("http://example.com/")
+    if type(res) == "table" and res.error then
+        return "HTTP Error: " .. res.error
     end
     return "Got " .. tostring(#res) .. " bytes from example.com"
 end)
@@ -15,9 +15,7 @@ end
 
 if env.get("PINHEAD_LISTEN") then
     ninep.listen(env.get("PINHEAD_LISTEN"))
-elseif env.get("PINHEAD_SSH_LISTEN") then
+end
+if env.get("PINHEAD_SSH_LISTEN") then
     sshfs.listen(env.get("PINHEAD_SSH_LISTEN"))
-else
-    -- ninep.listen("sock:/tmp/pinhead.sock")
-    -- sshfs.listen("127.0.0.1:2222")
 end

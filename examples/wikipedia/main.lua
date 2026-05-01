@@ -20,14 +20,12 @@ local bookmarks_db = doc.open(cwd .. "/bookmarks.db")
 -- Transport configuration — override via env vars for e2e tests
 if env.get("PINHEAD_LISTEN") then
     ninep.listen(env.get("PINHEAD_LISTEN"))
-elseif env.get("PINHEAD_SSH_LISTEN") then
+end
+if env.get("PINHEAD_SSH_LISTEN") then
     sshfs.listen(env.get("PINHEAD_SSH_LISTEN"))
-elseif env.get("PINHEAD_FUSE_MOUNT") then
+end
+if env.get("PINHEAD_FUSE_MOUNT") then
     fuse.mount(env.get("PINHEAD_FUSE_MOUNT"))
-else
-    -- ninep.listen("sock:/tmp/pinhead.sock")
-    -- sshfs.listen("127.0.0.1:2222")
-    -- fuse.mount("/tmp/pinhead")
 end
 
 -- Helper: list bookmark keys matching a virtual directory prefix.
@@ -38,7 +36,8 @@ local function list_bookmarks(prefix)
         prefix = prefix .. "/"
     end
     local pattern = prefix .. "%"
-    local rows = sql.query(bookmarks_db, "SELECT key FROM docs WHERE key LIKE ?1 ORDER BY key", {pattern})
+    local ok, rows = pcall(sql.query, bookmarks_db, "SELECT key FROM docs WHERE key LIKE ?1 ORDER BY key", {pattern})
+    if not ok then return "" end
     local seen = {}
     local results = {}
     for _, row in ipairs(rows) do
@@ -78,21 +77,21 @@ local function wikipedia_api(params)
     local url = base_url .. "?" .. table.concat(query_parts, "&") .. "&format=json"
 
     log.print("Fetching Wikipedia API: " .. url)
-    local ok, result = pcall(req.get, url, {
+    local result = req.get(url, {
         timeout_ms = 10000,
         headers = {
             ["User-Agent"] = "pinhead-wikipedia-example/1.0"
         }
     })
-    if not ok then
-        log.print("Wikipedia API error: " .. tostring(result))
-        return nil, tostring(result)
+    if type(result) == "table" and result.error then
+        log.print("Wikipedia API error: " .. result.error)
+        return nil, result.error
     end
 
-    local ok2, data = pcall(json.dec, result)
-    if not ok2 then
-        log.print("JSON decode error: " .. tostring(data))
-        log.print("Response body (first 200 chars): " .. string.sub(result, 1, 200))
+    local data = json.dec(result.body)
+    if type(data) == "table" and data.error then
+        log.print("JSON decode error: " .. data.error)
+        log.print("Response body (first 200 chars): " .. string.sub(tostring(result.body), 1, 200))
         return nil, "JSON decode error"
     end
 
@@ -181,6 +180,7 @@ local state = {
 
 -- Route: write to /search triggers a search
 route.write("/search", function(params, data)
+    if data == nil then return "" end
     local query = data:gsub("%s+$", ""):gsub("^%s+", "")
     if query == "" then
         return "Error: empty search query"

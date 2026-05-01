@@ -376,8 +376,14 @@ impl Filesystem for FuseFilesystem {
             &path,
             Bytes::copy_from_slice(data),
         ) {
-            Ok(_) => reply.written(data.len() as u32),
-            Err(_) => reply.error(Errno::EIO),
+            Ok(resp) => {
+                eprintln!("[fuse write] path={path} ok resp.len={}", resp.len());
+                reply.written(data.len() as u32);
+            }
+            Err(e) => {
+                eprintln!("[fuse write] path={path} error: {e}");
+                reply.error(Errno::EIO);
+            }
         }
     }
 

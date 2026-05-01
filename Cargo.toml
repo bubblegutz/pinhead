@@ -11,7 +11,6 @@ edition = "2024"
 lto = "fat"
 strip = "symbols"
 codegen-units = 1
-panic = "abort"
 opt-level = "z"
 
 [dependencies]

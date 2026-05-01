@@ -132,6 +132,7 @@ impl NinepState {
                 is_dir: true,
             },
         );
+        eprintln!("[ninep] NinepState::new() paths.len={}", paths.len());
         Self {
             fids: HashMap::new(),
             paths,
@@ -437,6 +438,10 @@ async fn handle_walk(
         is_dir = child.is_empty() || child == "." || child == "..";
         let mut state = shared.state.lock().await;
         cur_qid = state.alloc_qid(&full_path, is_dir);
+        if is_last {
+            eprintln!("[ninep walk] AFTER WALK paths={:?}",
+                state.paths.iter().map(|(k,v)| (k, &v.path)).collect::<Vec<_>>());
+        }
         cur_path = full_path;
 
         let qid_type = if is_dir { 0x80 } else { 0x00 };
@@ -657,6 +662,8 @@ async fn handle_read(
         } else {
             format!("{}/", entry.path)
         };
+        eprintln!("[ninep readdir] prefix={prefix:?} state paths={:?}",
+            state.paths.iter().map(|(k,v)| (k, &v.path)).collect::<Vec<_>>());
 
         let mut data = Vec::new();
         for (&qid, pent) in &state.paths {

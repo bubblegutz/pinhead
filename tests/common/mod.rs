@@ -148,7 +148,7 @@ impl PinheadInstance {
 
         let mut cleanup = vec![script_path];
 
-        match transport {
+        let ready = match transport {
             Transport::NinepSock(path) => {
                 cleanup.push(path.clone());
                 wait_for_socket(path)
@@ -167,7 +167,16 @@ impl PinheadInstance {
                 fs::create_dir_all(path).map_err(|e| format!("create mount dir: {e}"))?;
                 wait_for_fuse_mount(path)
             }
-        }?;
+        };
+
+        if let Err(e) = ready {
+            // Kill the child we already spawned before returning — prevents
+            // orphaned pinhead processes that hold ports/sockets.
+            let _ = Command::new("kill")
+                .args(["-9", &child.id().to_string()])
+                .status();
+            return Err(e);
+        }
 
         Ok(Self {
             child,
@@ -207,16 +216,8 @@ impl PinheadInstance {
 
 impl Drop for PinheadInstance {
     fn drop(&mut self) {
-        // Lazy unmount FUSE mounts before killing (prevents hang on rmdir)
-        for p in &self.cleanup_paths {
-            if std::path::Path::new(p).is_dir() {
-                let _ = std::process::Command::new("fusermount")
-                    .args(["-uz", p])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-        }
+        // Kill child first. Pure-Rust fuser handles unmount internally
+        // via BackgroundSession drop when the child process exits.
         let _ = self.child.kill();
         for _ in 0..100 {
             if self.child.try_wait().unwrap().is_some() { break; }
@@ -597,7 +598,7 @@ impl TestClient for NinepClient {
             let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
             if entry_size == 0 || off + entry_size > raw.len() { break; }
             // stat entry: type(2) dev(4) qid(13) mode(4) atime(4) mtime(4) length(8) name[s]
-            let name_start = 6 + 13 + 4 + 4 + 4 + 8; // = 39
+            let name_start = 2 + 6 + 13 + 4 + 4 + 4 + 8; // = 41 (2 for size field)
             if entry_size < name_start + 2 { off += entry_size; continue; }
             let name_len = u16::from_le_bytes(raw[off+name_start..off+name_start+2].try_into().unwrap()) as usize;
             if name_start + 2 + name_len > entry_size { off += entry_size; continue; }
@@ -605,7 +606,7 @@ impl TestClient for NinepClient {
             if !name.is_empty() && name != "." && name != ".." {
                 names.push(name);
             }
-            off += entry_size;
+            off += entry_size + 2; // account for 2-byte size field
         }
         names.sort();
         Ok(names)
@@ -812,7 +813,7 @@ impl TestClient for UdpNinepClient {
         while off + 2 <= raw.len() {
             let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
             if entry_size == 0 || off + entry_size > raw.len() { break; }
-            let name_start = 39;
+            let name_start = 41; // 2 for size field
             if entry_size < name_start + 2 { off += entry_size; continue; }
             let name_len = u16::from_le_bytes(raw[off+name_start..off+name_start+2].try_into().unwrap()) as usize;
             if name_start + 2 + name_len > entry_size { off += entry_size; continue; }
@@ -820,7 +821,7 @@ impl TestClient for UdpNinepClient {
             if !name.is_empty() && name != "." && name != ".." {
                 names.push(name);
             }
-            off += entry_size;
+            off += entry_size + 2; // account for 2-byte size field
         }
         names.sort();
         Ok(names)
@@ -1018,13 +1019,12 @@ pub fn setup_client_udp(client: &mut UdpNinepClient) -> Result<(), String> {
 
 /// Kill any orphaned pinhead processes from previous test runs that
 /// were killed before their Drop handler could run.
-fn cleanup_orphans() {
-    // Stale pinhead processes left by killed test runs block ports/sockets.
-    // Use exact name match (no -f) so we don't kill the test binary
-    // itself (whose full path contains "pinhead" when run via cargo test).
+pub fn cleanup_orphans() {
+    // Stale ph processes left by killed test runs block ports/sockets.
+    // Use -x (exact match) so we don't accidentally match the test harness.
     for _ in 0..3 {
         let status = Command::new("pkill")
-            .args(["-9", "pinhead"])
+            .args(["-9", "-x", "ph"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -1033,6 +1033,15 @@ fn cleanup_orphans() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // Unmount stale FUSE mounts from previous killed runs (dead mounts
+    // appear in /proc/mounts and fool wait_for_fuse_mount).
+    let _ = Command::new("sh")
+        .args([
+            "-c",
+            "grep 'pinhead-e2e' /proc/mounts 2>/dev/null | awk '{print $2}' | xargs -r fusermount -uz 2>/dev/null || true",
+        ])
+        .status();
+
     // Clean up all stale temp artifacts (sockets, scripts, db files, mount
     // dirs) from previous killed runs.
     let _ = Command::new("sh")

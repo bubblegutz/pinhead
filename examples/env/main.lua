@@ -18,14 +18,12 @@ end
 
 if env.get("PINHEAD_LISTEN") then
     ninep.listen(env.get("PINHEAD_LISTEN"))
-elseif env.get("PINHEAD_SSH_LISTEN") then
+end
+if env.get("PINHEAD_SSH_LISTEN") then
     sshfs.listen(env.get("PINHEAD_SSH_LISTEN"))
-elseif env.get("PINHEAD_FUSE_MOUNT") then
+end
+if env.get("PINHEAD_FUSE_MOUNT") then
     fuse.mount(env.get("PINHEAD_FUSE_MOUNT"))
-else
-    -- ninep.listen("sock:/tmp/pinhead.sock")
-    -- sshfs.listen("127.0.0.1:2222")
-    -- fuse.mount("/tmp/pinhead")
 end
 
 -- Read an existing env var at config time

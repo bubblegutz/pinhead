@@ -179,13 +179,13 @@ route.read("/serialize/jq", function()
     return json.enc(result)
 end)
 
--- /wiki/page — req.get with decode=json, pcall error handling
+-- /wiki/page — req.get with decode=json, error handled by type check
 route.read("/wiki/page", function()
-    local ok, res = pcall(req.get,
+    local res = req.get(
         "https://en.wikipedia.org/api/rest_v1/page/summary/Rust_(programming_language)",
-        {decode = "json"})
-    if not ok then
-        return "HTTP Error: " .. tostring(res)
+        {decode = "json", headers = {["User-Agent"] = "pinhead/0.1"}})
+    if type(res) == "table" and res.error then
+        return "HTTP Error: " .. res.error
     end
     local data = res.body
     return string.format([[
@@ -204,13 +204,20 @@ route.read("/wiki/search", function()
         query = {action = "opensearch", search = "Rust", format = "json", limit = "2"},
         decode = "json",
     }
-    local ok, res = pcall(req.get, "https://en.wikipedia.org/w/api.php", opts)
-    if not ok then
+    local res = req.get("https://en.wikipedia.org/w/api.php", opts)
+    if type(res) == "string" then
         return string.format([[
 Search Error
 ============
 Request Failed: %s
-]], tostring(res))
+]], res)
+    end
+    if type(res) == "table" and res.error then
+        return string.format([[
+Search Error
+============
+Request Failed: %s
+]], res.error)
     end
     local data = res.body
     local lines = {}
@@ -248,12 +255,10 @@ end
 -- Listeners — override via env vars for e2e tests.
 if env.get("PINHEAD_LISTEN") then
     ninep.listen(env.get("PINHEAD_LISTEN"))
-elseif env.get("PINHEAD_SSH_LISTEN") then
+end
+if env.get("PINHEAD_SSH_LISTEN") then
     sshfs.listen(env.get("PINHEAD_SSH_LISTEN"))
-elseif env.get("PINHEAD_FUSE_MOUNT") then
+end
+if env.get("PINHEAD_FUSE_MOUNT") then
     fuse.mount(env.get("PINHEAD_FUSE_MOUNT"))
-else
-    -- ninep.listen("sock:/tmp/pinhead.sock")
-    -- sshfs.listen("127.0.0.1:2222")
-    -- fuse.mount("/tmp/pinhead")
 end

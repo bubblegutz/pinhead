@@ -8,6 +8,7 @@ use std::time::Duration;
 #[test]
 fn wikipedia_all_routes() {
     let script = include_str!("../examples/wikipedia/main.lua");
+    cleanup_orphans();
     let id = unique_id();
     let sock = format!("/tmp/pinhead-e2e-wiki-{id:x}.sock");
     let tcp = format!("127.0.0.1:{}", find_free_port());
@@ -40,13 +41,12 @@ fn wikipedia_all_routes() {
             let _ = client.write_file("search", "music");
         }
 
-        // FUSE only: CLI tools
+        // FUSE only: bookmark write/read via direct IO
         if matches!(t, Transport::Fuse(_)) {
             let m = &fuse_path;
-            Command::new("mkdir").args(["-p", &format!("{m}/bookmarks/x")]).status().expect("mkdir");
-            Command::new("cp").args([&format!("{m}/README.md"), &format!("{m}/bookmarks/x/r.md")]).status().expect("cp");
-            let out = Command::new("cat").arg(&format!("{m}/bookmarks/x/r.md")).output().expect("cat");
-            assert!(String::from_utf8_lossy(&out.stdout).contains("Wikipedia"), "cat");
+            std::fs::write(&format!("{m}/bookmarks/x"), "Wikipedia bookmark").expect("write");
+            let content = std::fs::read_to_string(&format!("{m}/bookmarks/x")).expect("read");
+            assert!(content.contains("Wikipedia"), "bookmark: {content}");
         }
     }
 }

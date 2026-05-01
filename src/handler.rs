@@ -9,6 +9,35 @@ use tokio::sync::oneshot;
 use crate::serialize;
 use crate::store;
 
+fn to_lua_result<'lua>(
+    lua: &'lua mlua::Lua,
+    result: Result<mlua::Value<'lua>, String>,
+) -> mlua::Result<mlua::Value<'lua>> {
+    match result {
+        Ok(v) => Ok(v),
+        Err(e) => match lua.create_table() {
+            Ok(t) => { let _ = t.set("error", e); Ok(mlua::Value::Table(t)) }
+            Err(_) => Ok(mlua::Value::Nil),
+        },
+    }
+}
+
+fn to_lua_str_result<'lua>(
+    lua: &'lua mlua::Lua,
+    result: Result<String, String>,
+) -> mlua::Result<mlua::Value<'lua>> {
+    match result {
+        Ok(s) => match lua.create_string(&s) {
+            Ok(ls) => Ok(mlua::Value::String(ls)),
+            Err(_) => Ok(mlua::Value::Nil),
+        },
+        Err(e) => match lua.create_table() {
+            Ok(t) => { let _ = t.set("error", e); Ok(mlua::Value::Table(t)) }
+            Err(_) => Ok(mlua::Value::Nil),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handler request / response
 // ---------------------------------------------------------------------------
@@ -881,28 +910,28 @@ pub(crate) fn setup_runtime_apis(
 
         let fn_ = lua
             .create_function(|lua, val: mlua::Value| {
-                serialize::json_encode(lua, val).map_err(mlua::Error::runtime)
+                to_lua_str_result(lua, serialize::json_encode(lua, val))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("enc", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, val: mlua::Value| {
-                serialize::json_encode_pretty(lua, val).map_err(mlua::Error::runtime)
+                to_lua_str_result(lua, serialize::json_encode_pretty(lua, val))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("enc_pretty", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, text: String| {
-                serialize::json_decode(lua, text).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::json_decode(lua, text))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("dec", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, (text, path): (String, String)| {
-                serialize::json_query(lua, text, path).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::json_query(lua, text, path))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("q", fn_).map_err(|e| format!("{e}"))?;
@@ -911,7 +940,7 @@ pub(crate) fn setup_runtime_apis(
         {
             let fn_ = lua
                 .create_function(|lua, (text, filter): (String, String)| {
-                    serialize::json_jq(lua, text, filter).map_err(mlua::Error::runtime)
+                    to_lua_result(lua, serialize::json_jq(lua, text, filter))
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("jq", fn_).map_err(|e| format!("{e}"))?;
@@ -921,7 +950,7 @@ pub(crate) fn setup_runtime_apis(
         {
             let fn_ = lua
                 .create_function(|lua, text: String| {
-                    crate::serialize::json_from_yaml(lua, text).map_err(mlua::Error::runtime)
+                    to_lua_str_result(lua, crate::serialize::json_from_yaml(lua, text))
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("from_yaml", fn_).map_err(|e| format!("{e}"))?;
@@ -936,21 +965,21 @@ pub(crate) fn setup_runtime_apis(
 
         let fn_ = lua
             .create_function(|lua, val: mlua::Value| {
-                serialize::yaml_encode(lua, val).map_err(mlua::Error::runtime)
+                to_lua_str_result(lua, serialize::yaml_encode(lua, val))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("enc", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, text: String| {
-                serialize::yaml_decode(lua, text).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::yaml_decode(lua, text))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("dec", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, (text, path): (String, String)| {
-                serialize::yaml_query(lua, text, path).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::yaml_query(lua, text, path))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("q", fn_).map_err(|e| format!("{e}"))?;
@@ -959,7 +988,7 @@ pub(crate) fn setup_runtime_apis(
         {
             let fn_ = lua
                 .create_function(|lua, text: String| {
-                    crate::serialize::yaml_from_json(lua, text).map_err(mlua::Error::runtime)
+                    to_lua_str_result(lua, crate::serialize::yaml_from_json(lua, text))
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("from_json", fn_).map_err(|e| format!("{e}"))?;
@@ -974,21 +1003,21 @@ pub(crate) fn setup_runtime_apis(
 
         let fn_ = lua
             .create_function(|lua, val: mlua::Value| {
-                serialize::toml_encode(lua, val).map_err(mlua::Error::runtime)
+                to_lua_str_result(lua, serialize::toml_encode(lua, val))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("enc", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, text: String| {
-                serialize::toml_decode(lua, text).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::toml_decode(lua, text))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("dec", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, (text, path): (String, String)| {
-                serialize::toml_query(lua, text, path).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::toml_query(lua, text, path))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("q", fn_).map_err(|e| format!("{e}"))?;
@@ -1002,21 +1031,21 @@ pub(crate) fn setup_runtime_apis(
 
         let fn_ = lua
             .create_function(|lua, val: mlua::Value| {
-                serialize::csv_encode(lua, val).map_err(mlua::Error::runtime)
+                to_lua_str_result(lua, serialize::csv_encode(lua, val))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("enc", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, text: String| {
-                serialize::csv_decode(lua, text).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::csv_decode(lua, text))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("dec", fn_).map_err(|e| format!("{e}"))?;
 
         let fn_ = lua
             .create_function(|lua, (text, filter): (String, String)| {
-                serialize::csv_query(lua, text, filter).map_err(mlua::Error::runtime)
+                to_lua_result(lua, serialize::csv_query(lua, text, filter))
             })
             .map_err(|e| format!("{e}"))?;
         t.set("q", fn_).map_err(|e| format!("{e}"))?;
@@ -1060,8 +1089,7 @@ pub(crate) fn setup_runtime_apis(
             let fn_ = lua
                 .create_function(
                     move |lua, (url, opts): (String, Option<mlua::Table>)| {
-                        crate::req::do_request(lua, &method_str, url, opts)
-                            .map_err(mlua::Error::runtime)
+                        to_lua_result(lua, crate::req::do_request(lua, &method_str, url, opts))
                     },
                 )
                 .map_err(|e| format!("{e}"))?;
