@@ -1161,11 +1161,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.read(address, path) -> string
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.read_file(&path)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p read: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.read_file(&path)
+                            .map_err(|e| format!("9p read: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("read", fn_).map_err(|e| format!("{e}"))?;
@@ -1174,11 +1177,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.write(address, path, data) -> string
         {
             let fn_ = lua
-                .create_function(|_, (address, path, data): (String, String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.write_file(&path, &data)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p write: {e}")))
+                .create_function(|lua, (address, path, data): (String, String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.write_file(&path, &data)
+                            .map_err(|e| format!("9p write: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("write", fn_).map_err(|e| format!("{e}"))?;
@@ -1187,11 +1193,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.stat(address, path) -> string
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.stat(&path)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p stat: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.stat(&path)
+                            .map_err(|e| format!("9p stat: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("stat", fn_).map_err(|e| format!("{e}"))?;
@@ -1200,11 +1209,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.ls(address, path) -> string
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.ls(&path, false)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p ls: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.ls(&path, false)
+                            .map_err(|e| format!("9p ls: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("ls", fn_).map_err(|e| format!("{e}"))?;
@@ -1213,11 +1225,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.lsl(address, path) -> string (long listing)
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.ls(&path, true)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p ls -l: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.ls(&path, true)
+                            .map_err(|e| format!("9p ls -l: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("lsl", fn_).map_err(|e| format!("{e}"))?;
@@ -1226,11 +1241,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.mkdir(address, path) -> string
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.mkdir(&path)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p mkdir: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.mkdir(&path)
+                            .map_err(|e| format!("9p mkdir: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("mkdir", fn_).map_err(|e| format!("{e}"))?;
@@ -1239,11 +1257,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.create(address, path) -> string (touch)
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.create_file(&path)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p create: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.create_file(&path)
+                            .map_err(|e| format!("9p create: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("create", fn_).map_err(|e| format!("{e}"))?;
@@ -1252,11 +1273,14 @@ pub(crate) fn setup_runtime_apis(
         // ninep_client.remove(address, path) -> string
         {
             let fn_ = lua
-                .create_function(|_, (address, path): (String, String)| {
-                    let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p connect: {e}")))?;
-                    client.remove(&path)
-                        .map_err(|e| mlua::Error::RuntimeError(format!("9p remove: {e}")))
+                .create_function(|lua, (address, path): (String, String)| {
+                    let result = (|| -> Result<String, String> {
+                        let mut client = crate::frontend::ninep_client::NinepClient::connect(&address)
+                            .map_err(|e| format!("9p connect: {e}"))?;
+                        client.remove(&path)
+                            .map_err(|e| format!("9p remove: {e}"))
+                    })();
+                    to_lua_str_result(lua, result)
                 })
                 .map_err(|e| format!("{e}"))?;
             t.set("remove", fn_).map_err(|e| format!("{e}"))?;

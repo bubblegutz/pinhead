@@ -406,11 +406,15 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |_, handle_id: i64| {
-                let h = get_handle(&reg, handle_id)?;
-                let _ = send_close_writer(&h.write_tx);
-                reg.lock()
-                    .map_err(|_| mlua::Error::RuntimeError("registry lock poisoned".into()))?
-                    .remove(handle_id as u64);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), mlua::Error> {
+                    let h = get_handle(&reg, handle_id)?;
+                    let _ = send_close_writer(&h.write_tx);
+                    reg.lock()
+                        .map_err(|_| mlua::Error::RuntimeError("registry lock poisoned".into()))?
+                        .remove(handle_id as u64);
+                    Ok(())
+                }));
+                let _ = r;
                 Ok(())
             })
             .map_err(|e| format!("{e}"))?;
@@ -584,11 +588,15 @@ fn register_sql_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
         let reg = reg.clone();
         let fn_ = lua
             .create_function(move |_, handle_id: i64| {
-                let h = get_handle(&reg, handle_id)?;
-                let _ = send_close_writer(&h.write_tx);
-                reg.lock()
-                    .map_err(|_| mlua::Error::RuntimeError("registry lock poisoned".into()))?
-                    .remove(handle_id as u64);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), mlua::Error> {
+                    let h = get_handle(&reg, handle_id)?;
+                    let _ = send_close_writer(&h.write_tx);
+                    reg.lock()
+                        .map_err(|_| mlua::Error::RuntimeError("registry lock poisoned".into()))?
+                        .remove(handle_id as u64);
+                    Ok(())
+                }));
+                let _ = r;
                 Ok(())
             })
             .map_err(|e| format!("{e}"))?;
