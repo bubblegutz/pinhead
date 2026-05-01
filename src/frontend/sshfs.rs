@@ -270,7 +270,6 @@ impl SftpSession {
         pflags: OpenFlags,
         _attrs: FileAttributes,
     ) -> Result<Handle, StatusCode> {
-        use std::ops::BitOr;
         let creat = OpenFlags::CREATE;
         if (pflags.bits() & creat.bits()) != 0 {
             self.route(FsOperation::Create, &filename, Bytes::new())
