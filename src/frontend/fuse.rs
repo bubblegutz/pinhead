@@ -31,6 +31,8 @@ pub struct FuseFilesystem {
     ino_next: AtomicU64,
     /// Inode → absolute path mapping (populated by `lookup`).
     paths: Mutex<HashMap<u64, String>>,
+    /// Path → content length cache (populated by write/read, consumed by getattr).
+    size_cache: Mutex<HashMap<String, u64>>,
     /// Pre-computed root attr (inode 1).
     root_attr: FileAttr,
     /// Captured tokio runtime handle for block_on from FUSE background thread.
@@ -64,6 +66,7 @@ impl FuseFilesystem {
             tx,
             ino_next: AtomicU64::new(2),
             paths: Mutex::new(HashMap::from([(1, "/".to_string())])),
+            size_cache: Mutex::new(HashMap::new()),
             root_attr,
             runtime: tokio::runtime::Handle::current(),
         }
@@ -207,14 +210,16 @@ impl Filesystem for FuseFilesystem {
                     reply.attr(&TTL, &self.file_attr(ino.0, data.len() as u64, false));
                 } else if size == 0 && data.is_empty() && !is_dir {
                     // Handler returned empty data (e.g. readdir handler for
-                    // a file path). Fall back to read to get actual content.
-                    match self.send_req(FsOperation::Read, &path, Bytes::new()) {
-                        Ok(read_data) => {
-                            reply.attr(&TTL, &self.file_attr(ino.0, read_data.len() as u64, false));
-                        }
-                        Err(_) => {
-                            reply.attr(&TTL, &self.file_attr(ino.0, 0, false));
-                        }
+                    // a file path). Check the size cache, then fall back to
+                    // read to get actual content.
+                    let cached = self.size_cache.lock().unwrap().get(&path).copied();
+                    match cached.or_else(|| {
+                        self.send_req(FsOperation::Read, &path, Bytes::new())
+                            .ok()
+                            .map(|d| d.len() as u64)
+                    }) {
+                        Some(s) => reply.attr(&TTL, &self.file_attr(ino.0, s, false)),
+                        None => reply.attr(&TTL, &self.file_attr(ino.0, 0, false)),
                     }
                 } else {
                     reply.attr(&TTL, &self.file_attr(ino.0, size, is_dir));
@@ -346,6 +351,7 @@ impl Filesystem for FuseFilesystem {
 
         match self.send_req(FsOperation::Read, &path, Bytes::new()) {
             Ok(data) => {
+                self.size_cache.lock().unwrap().insert(path.clone(), data.len() as u64);
                 let start = offset as usize;
                 let end = (start + size as usize).min(data.len());
                 let chunk = if start < data.len() {
@@ -382,6 +388,7 @@ impl Filesystem for FuseFilesystem {
             Bytes::copy_from_slice(data),
         ) {
             Ok(resp) => {
+                self.size_cache.lock().unwrap().insert(path.clone(), data.len() as u64);
                 eprintln!("[fuse write] path={path} ok resp.len={}", resp.len());
                 reply.written(data.len() as u32);
             }
