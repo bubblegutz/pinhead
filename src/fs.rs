@@ -297,12 +297,10 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
         let f = lua
             .create_function(
                 |_, (path, uid, gid): (String, u32, u32)| -> Result<Option<bool>, mlua::Error> {
-                    let cpath = CString::new(path.as_str())
-                        .map_err(|_| mlua::Error::ToLuaConversionError {
-                            from: "String",
-                            to: "CString",
-                            message: Some("path contains null byte".into()),
-                        })?;
+                    let cpath = match CString::new(path.as_str()) {
+                        Ok(c) => c,
+                        Err(_) => return Ok(None),
+                    };
                     let ret = unsafe { libc::chown(cpath.as_ptr(), uid, gid) };
                     if ret == 0 { Ok(Some(true)) } else { Ok(None) }
                 },
@@ -322,12 +320,10 @@ pub fn register_lua_apis(lua: &Lua) -> Result<(), String> {
         let f = lua
             .create_function(
                 |_, (path, atime, mtime): (String, i64, i64)| -> Result<Option<bool>, mlua::Error> {
-                    let cpath = CString::new(path.as_str())
-                        .map_err(|_| mlua::Error::ToLuaConversionError {
-                            from: "String",
-                            to: "CString",
-                            message: Some("path contains null byte".into()),
-                        })?;
+                    let cpath = match CString::new(path.as_str()) {
+                        Ok(c) => c,
+                        Err(_) => return Ok(None),
+                    };
                     let times = [
                         libc::timespec {
                             tv_sec: atime,

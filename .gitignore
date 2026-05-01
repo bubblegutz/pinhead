@@ -48,3 +48,7 @@ CONTEXT.md
 claude.md
 DECISIONS.md
 TODO.md*.db
+
+# Python scripts / artifacts
+*.py
+*.pyc

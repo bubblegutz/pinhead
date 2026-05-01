@@ -345,16 +345,17 @@ pub(crate) fn send_close_writer(tx: &mpsc::Sender<WriteRequest>) -> Result<(), S
 // ---------------------------------------------------------------------------
 
 /// Register `doc.*` and `sql.*` Lua tables.  Called from `HandlerRuntime::new`.
+/// Both doc and sql use the same registry so handles created by doc.open()
+/// can be used with sql.query() and vice-versa.
 pub fn register_lua_apis(
     lua: &mlua::Lua,
 ) -> Result<(Arc<Mutex<DbRegistry>>, Arc<Mutex<DbRegistry>>), String> {
-    let doc_reg = Arc::new(Mutex::new(DbRegistry::new()));
-    let sql_reg = Arc::new(Mutex::new(DbRegistry::new()));
+    let reg = Arc::new(Mutex::new(DbRegistry::new()));
 
-    register_doc_api(lua, doc_reg.clone())?;
-    register_sql_api(lua, sql_reg.clone())?;
+    register_doc_api(lua, reg.clone())?;
+    register_sql_api(lua, reg.clone())?;
 
-    Ok((doc_reg, sql_reg))
+    Ok((reg.clone(), reg))
 }
 
 fn get_handle(

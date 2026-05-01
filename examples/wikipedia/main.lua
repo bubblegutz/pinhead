@@ -320,8 +320,8 @@ route.read("/bookmarks/{path}", function(params, data)
     return val.content or ""
 end)
 
--- Create a bookmark directory (mkdir command)
-route.create("/bookmarks/{path}", function(params, data)
+-- Create a bookmark directory (create operation)
+route.register("/bookmarks/{path}", {"lookup", "getattr", "create"}, function(params, data)
     local virtual_path = params.path
     if not virtual_path then
         return "Error: could not determine bookmark path"

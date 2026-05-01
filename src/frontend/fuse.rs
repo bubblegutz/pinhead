@@ -170,13 +170,7 @@ impl Filesystem for FuseFilesystem {
                     }
                     Err(_) => (false, data.len() as u64),
                 };
-                let is_dir = if !parsed_is_dir {
-                    let probe = format!("{}/x", path);
-                    probe != path && path != "/" && self.send_req(FsOperation::Lookup, &probe, Bytes::new()).is_ok()
-                } else {
-                    true
-                };
-                reply.entry(&TTL, &self.file_attr(ino, size, is_dir), Generation(0));
+                reply.entry(&TTL, &self.file_attr(ino, size, parsed_is_dir), Generation(0));
             }
             Err(msg) => {
                 if msg.starts_with("no route matches") {
@@ -211,6 +205,17 @@ impl Filesystem for FuseFilesystem {
                 // getattr returned content (no size= token) — use length
                 if size == 0 && !data.is_empty() && parse_attr_size(&data).is_none() {
                     reply.attr(&TTL, &self.file_attr(ino.0, data.len() as u64, false));
+                } else if size == 0 && data.is_empty() && !is_dir {
+                    // Handler returned empty data (e.g. readdir handler for
+                    // a file path). Fall back to read to get actual content.
+                    match self.send_req(FsOperation::Read, &path, Bytes::new()) {
+                        Ok(read_data) => {
+                            reply.attr(&TTL, &self.file_attr(ino.0, read_data.len() as u64, false));
+                        }
+                        Err(_) => {
+                            reply.attr(&TTL, &self.file_attr(ino.0, 0, false));
+                        }
+                    }
                 } else {
                     reply.attr(&TTL, &self.file_attr(ino.0, size, is_dir));
                 }
