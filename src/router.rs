@@ -154,6 +154,10 @@ async fn dispatch(
     };
 
     // Select the handler_name based on the operation.
+    // The merged RouteMeta maps each op to the handler that LAST claimed it
+    // during route registration.  If no handler claimed this specific op,
+    // fall back to the wildcard "*" handler (registered with empty ops =
+    // all ops).
     let handler_name = meta.handlers.get(op.as_str()).or_else(|| {
         // Fall back to wildcard "*" handler (registered without ops).
         meta.handlers.get("*")

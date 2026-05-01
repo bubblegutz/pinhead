@@ -347,6 +347,8 @@ pub(crate) fn send_close_writer(tx: &mpsc::Sender<WriteRequest>) -> Result<(), S
 /// Register `doc.*` and `sql.*` Lua tables.  Called from `HandlerRuntime::new`.
 /// Both doc and sql use the same registry so handles created by doc.open()
 /// can be used with sql.query() and vice-versa.
+/// Both doc and sql use the same registry so handles created by doc.open()
+/// can be used with sql.query() and vice-versa.
 pub fn register_lua_apis(
     lua: &mlua::Lua,
 ) -> Result<(Arc<Mutex<DbRegistry>>, Arc<Mutex<DbRegistry>>), String> {
@@ -414,6 +416,12 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                         .remove(handle_id as u64);
                     Ok(())
                 }));
+                // Intentionally discard the inner error.  Returning
+                // Err(mlua::Error) from a create_function callback
+                // triggers lua_error() C longjmp, which Rust
+                // catch_unwind cannot safely intercept.  We return
+                // Ok(()) even on failure so the caller gets a
+                // graceful nil/empty response instead of a crash.
                 let _ = r;
                 Ok(())
             })
@@ -436,6 +444,12 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                     ))?;
                     Ok(())
                 }));
+                // Intentionally discard the inner error.  Returning
+                // Err(mlua::Error) from a create_function callback
+                // triggers lua_error() C longjmp, which Rust
+                // catch_unwind cannot safely intercept.  We return
+                // Ok(()) even on failure so the caller gets a
+                // graceful nil/empty response instead of a crash.
                 let _ = r;
                 Ok(())
             })
@@ -486,6 +500,12 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                     ))?;
                     Ok(())
                 }));
+                // Intentionally discard the inner error.  Returning
+                // Err(mlua::Error) from a create_function callback
+                // triggers lua_error() C longjmp, which Rust
+                // catch_unwind cannot safely intercept.  We return
+                // Ok(()) even on failure so the caller gets a
+                // graceful nil/empty response instead of a crash.
                 let _ = r;
                 Ok(())
             })
@@ -596,6 +616,12 @@ fn register_sql_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                         .remove(handle_id as u64);
                     Ok(())
                 }));
+                // Intentionally discard the inner error.  Returning
+                // Err(mlua::Error) from a create_function callback
+                // triggers lua_error() C longjmp, which Rust
+                // catch_unwind cannot safely intercept.  We return
+                // Ok(()) even on failure so the caller gets a
+                // graceful nil/empty response instead of a crash.
                 let _ = r;
                 Ok(())
             })

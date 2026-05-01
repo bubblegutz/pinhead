@@ -46,7 +46,10 @@ async fn main() {
 
     // ── 3. Build the path router from Lua-registered routes ─────────────
     // Merge registrations by pattern — each pattern gets a RouteMeta with
-    // an op→handler_name map.
+    // an op→handler_name map.  When two handlers register the same pattern
+    // with overlapping ops (e.g. route.write and route.readdir both claim
+    // "lookup"), the LAST registration wins for that op.  This matches
+    // FUSE semantics where each op for a path is handled by one function.
     let mut pattern_map: HashMap<&str, RouteMeta> = HashMap::new();
     for r in &routes {
         let meta = pattern_map

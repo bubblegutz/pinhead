@@ -31,7 +31,10 @@ pub struct FuseFilesystem {
     ino_next: AtomicU64,
     /// Inode → absolute path mapping (populated by `lookup`).
     paths: Mutex<HashMap<u64, String>>,
-    /// Path → content length cache (populated by write/read, consumed by getattr).
+    /// Path → content length cache (populated by write/read, consumed by
+    /// getattr fallback).  When a handler returns empty data for getattr
+    /// (e.g. the readdir handler matched a file path), we check this cache
+    /// before falling back to a full Read request.
     size_cache: Mutex<HashMap<String, u64>>,
     /// Pre-computed root attr (inode 1).
     root_attr: FileAttr,

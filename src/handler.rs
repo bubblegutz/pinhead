@@ -223,6 +223,14 @@ impl HandlerRuntime {
             }
 
             // route.default(func)
+            //
+            // NOTE: This stores the function in `default_handler` as an
+            // ultimate fallback inside call_lua(), but does NOT register
+            // a /{*path} route.  The per-bundle .default() helpers
+            // (route.read.default, route.write.default, etc.) DO register
+            // /{*path} routes with their respective op sets.  Bare
+            // route.default() without a bundle prefix is intentionally
+            // weak — it matches FUSE, which has no implicit catch-all.
             {
                 let default_handler = default_handler.clone();
                 let default_fn = lua
