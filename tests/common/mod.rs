@@ -207,12 +207,19 @@ impl PinheadInstance {
 
 impl Drop for PinheadInstance {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        // Give the child a moment to die, then move on — the OS will reap.
-        for _ in 0..100 {
-            if self.child.try_wait().unwrap().is_some() {
-                break;
+        // Lazy unmount FUSE mounts before killing (prevents hang on rmdir)
+        for p in &self.cleanup_paths {
+            if std::path::Path::new(p).is_dir() {
+                let _ = std::process::Command::new("fusermount")
+                    .args(["-uz", p])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
             }
+        }
+        let _ = self.child.kill();
+        for _ in 0..100 {
+            if self.child.try_wait().unwrap().is_some() { break; }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         for p in &self.cleanup_paths {
