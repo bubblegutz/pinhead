@@ -14,6 +14,53 @@ pub trait NinepStream: Read + Write {}
 impl NinepStream for UnixStream {}
 impl NinepStream for TcpStream {}
 
+/// Wraps a raw TCP stream with the 9P mux frame protocol.
+/// Each 9P message is wrapped in a mux frame: [stream_id:4][len:4][payload].
+/// This must match the mux implementation in src/frontend/ninep.rs.
+struct MuxedTcpStream {
+    inner: TcpStream,
+    /// Buffer for reading from a mux frame.
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl Read for MuxedTcpStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Refill from mux frame if buffer is exhausted.
+        if self.pos >= self.buf.len() {
+            let mut header = [0u8; 8];
+            self.inner.read_exact(&mut header)?;
+            let _stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            self.buf.resize(len, 0);
+            if len > 0 {
+                self.inner.read_exact(&mut self.buf)?;
+            }
+            self.pos = 0;
+        }
+        let avail = (self.buf.len() - self.pos).min(buf.len());
+        buf[..avail].copy_from_slice(&self.buf[self.pos..self.pos + avail]);
+        self.pos += avail;
+        Ok(avail)
+    }
+}
+
+impl Write for MuxedTcpStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut header = Vec::with_capacity(8 + buf.len());
+        header.extend_from_slice(&1u32.to_le_bytes()); // stream_id
+        header.extend_from_slice(&(buf.len() as u32).to_le_bytes());
+        header.extend_from_slice(buf);
+        self.inner.write_all(&header)?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl NinepStream for MuxedTcpStream {}
+
 // ── Transport abstraction ──────────────────────────────────────────────────
 
 /// All frontend protocols available in pinhead.
@@ -437,7 +484,7 @@ impl NinepClient {
         let start = Instant::now();
         loop {
             match TcpStream::connect(addr) {
-                Ok(stream) => return Ok(Self { stream: Box::new(stream) }),
+                Ok(stream) => return Ok(Self { stream: Box::new(MuxedTcpStream { inner: stream, buf: Vec::new(), pos: 0 }) }),
                 Err(e) => {
                     if start.elapsed() > Duration::from_secs(3) {
                         return Err(format!("connect tcp {addr}: {e}"));

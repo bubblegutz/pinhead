@@ -4,13 +4,17 @@
 //! Session state (fid/qid tracking) is managed internally.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use std::sync::Arc as StdArc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio_rustls::TlsAcceptor;
 
 use crate::fsop::FsOperation;
 use crate::router::Request;
@@ -1086,8 +1090,104 @@ pub async fn serve_tcp(
         let (stream, peer) = listener.accept().await?;
         eprintln!("[9p-tcp] connection from {peer}");
         let shared = shared.clone();
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
+        let writer = MuxWriter { tx: frame_tx };
+
+        // Spawn mux reader in a separate task.
         tokio::spawn(async move {
-            run_connection(stream, shared).await;
+            run_server_mux(stream, stream_tx, frame_rx).await;
+        });
+
+        let mut streams: HashMap<u32, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
+        while let Some((stream_id, payload)) = stream_rx.recv().await {
+            if let Some(tx) = streams.get(&stream_id) {
+                // Existing stream — deliver directly.
+                let _ = tx.send(payload);
+            } else {
+                // New stream — create channel, spawn handler.
+                let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                let _ = tx.send(payload);
+                streams.insert(stream_id, tx);
+                let writer = writer.clone();
+                let mux = MuxStream { writer, stream_id, rx, buf: Vec::new(), pos: 0 };
+                let s = shared.clone();
+                tokio::spawn(async move {
+                    run_connection(mux, s).await;
+                });
+            }
+            }
+        }
+    }
+
+// ── UDP 9P2000 server ─────────────────────────────────────────────────
+//
+// ── TLS 9P2000 server ──────────────────────────────────────────────────
+
+/// Start a 9P2000 server over TCP with TLS encryption, then mux.
+///
+/// PEM file must contain the server certificate chain followed by the
+/// private key (in two PEM blocks).  Compatible with standard TLS 1.2+.
+pub async fn serve_tcp_tls(
+    router_tx: mpsc::Sender<Request>,
+    addr: &str,
+    cert_path: &str,
+    key_path: &str,
+) -> std::io::Result<()> {
+    use rustls_pemfile::{certs, private_key};
+
+    let cert_file = &mut std::io::BufReader::new(
+        std::fs::File::open(cert_path).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, format!("cert {cert_path}: {e}"))
+        })?,
+    );
+    let key_file = &mut std::io::BufReader::new(
+        std::fs::File::open(key_path).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, format!("key {key_path}: {e}"))
+        })?,
+    );
+
+    let cert_chain: Vec<CertificateDer> = certs(cert_file)
+        .filter_map(|r| r.ok())
+        .collect();
+    let priv_key = private_key(key_file)
+        .ok()
+        .flatten()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no private key found"))?;
+
+    let tls_config = StdArc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, priv_key)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?,
+    );
+    let acceptor = TlsAcceptor::from(tls_config);
+
+    let listener = TcpListener::bind(addr).await?;
+    eprintln!("[9p-tls] listening on {addr}");
+
+    let shared = StdArc::new(Shared {
+        state: Mutex::new(NinepState::new()),
+        router_tx,
+        msize: RwLock::new(8192),
+    });
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        eprintln!("[9p-tls] connection from {peer}");
+        let shared = shared.clone();
+        let acceptor = acceptor.clone();
+
+        tokio::spawn(async move {
+            // TLS handshake first, then raw 9P over TLS (no mux).
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[9p-tls] handshake error: {e}");
+                    return;
+                }
+            };
+            run_connection(tls_stream, shared).await;
         });
     }
 }
@@ -1246,6 +1346,19 @@ impl NinepStream for TcpStream {
     }
 }
 
+impl NinepStream for tokio_rustls::server::TlsStream<TcpStream> {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        AsyncReadExt::read_exact(self, buf).await?;
+        Ok(())
+    }
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        AsyncWriteExt::write_all(self, buf).await
+    }
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        AsyncWriteExt::shutdown(self).await
+    }
+}
+
 /// Virtual stream that captures written bytes into a Vec (for UDP replies).
 struct VirtualStream<'a> {
     buf: &'a mut Vec<u8>,
@@ -1267,3 +1380,174 @@ impl NinepStream for VirtualStream<'_> {
 
 // We need RERROR message type for error replies
 const RERROR: u8 = 107;
+
+// ── 9P multiplexer (mux) — frame-based stream multiplexing for TCP ────
+//
+// Wire format: [stream_id:4][payload_len:4][payload...]  (all LE)
+// Each stream is a single request/response pair.
+
+/// Handle for sending frames to a mux connection's writer task.
+#[derive(Clone)]
+pub(crate) struct MuxWriter {
+    tx: mpsc::UnboundedSender<(u32, Vec<u8>)>,
+}
+
+impl MuxWriter {
+    fn send(&self, stream_id: u32, payload: Vec<u8>) -> Result<(), String> {
+        self.tx
+            .send((stream_id, payload))
+            .map_err(|_| "mux writer gone".to_string())
+    }
+}
+
+/// A virtual stream backed by the mux protocol.  Reads dequeue from a
+/// channel fed by the mux reader, writes send frames via the mux writer.
+struct MuxStream {
+    writer: MuxWriter,
+    stream_id: u32,
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl NinepStream for MuxStream {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let mut need = buf.len();
+        let mut offset = 0;
+        while need > 0 {
+            // Refill from channel if buffer is exhausted.
+            if self.pos >= self.buf.len() {
+                match self.rx.recv().await {
+                    Some(data) => { self.buf = data; self.pos = 0; }
+                    None => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "mux stream closed")),
+                }
+            }
+            let avail = (self.buf.len() - self.pos).min(need);
+            buf[offset..offset + avail].copy_from_slice(&self.buf[self.pos..self.pos + avail]);
+            self.pos += avail;
+            offset += avail;
+            need -= avail;
+        }
+        Ok(())
+    }
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.writer
+            .send(self.stream_id, buf.to_vec())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e))
+    }
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Run a muxed connection.  Reads frames from `frame_rx` and
+/// delivers streams through `stream_tx`.  Generic over any
+/// AsyncRead+AsyncWrite stream (e.g. TcpStream, TlsStream).
+pub(crate) async fn run_server_mux<S>(
+    stream: S,
+    stream_tx: mpsc::UnboundedSender<(u32, Vec<u8>)>,
+    mut frame_rx: mpsc::UnboundedReceiver<(u32, Vec<u8>)>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let (reader, mut tcp_writer) = tokio::io::split(stream);
+
+    tokio::spawn(async move {
+        while let Some((stream_id, payload)) = frame_rx.recv().await {
+            let mut buf = Vec::with_capacity(8 + payload.len());
+            buf.extend_from_slice(&stream_id.to_le_bytes());
+            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&payload);
+            if tcp_writer.write_all(&buf).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut reader = reader;
+    loop {
+        let mut header = [0u8; 8];
+        if reader.read_exact(&mut header).await.is_err() {
+            break;
+        }
+        let stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let mut payload = vec![0u8; len];
+        if len > 0 && reader.read_exact(&mut payload).await.is_err() {
+            break;
+        }
+        let _ = stream_tx.send((stream_id, payload));
+    }
+    drop(stream_tx);
+}
+
+/// A multiplexed client connection using the 9P mux protocol.
+pub(crate) struct MuxClient {
+    writer: MuxWriter,
+    next_id: Arc<AtomicU32>,
+    _reader_handle: tokio::task::JoinHandle<()>,
+    pending: Arc<Mutex<HashMap<u32, oneshot::Sender<Vec<u8>>>>>,
+}
+
+impl MuxClient {
+    /// Connect to a mux server.
+    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("mux connect {addr}: {e}"))?;
+        let (reader, writer) = tokio::io::split(stream);
+        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
+        let writer_handle = MuxWriter { tx: frame_tx };
+        let pending = Arc::new(Mutex::new(HashMap::<u32, oneshot::Sender<Vec<u8>>>::new()));
+
+        let mut writer = writer;
+        let _write_handle = tokio::spawn(async move {
+            while let Some((stream_id, payload)) = frame_rx.recv().await {
+                let mut buf = Vec::with_capacity(8 + payload.len());
+                buf.extend_from_slice(&stream_id.to_le_bytes());
+                buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&payload);
+                if writer.write_all(&buf).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let p = pending.clone();
+        let reader_handle = tokio::spawn(async move {
+            let mut reader = reader;
+            loop {
+                let mut header = [0u8; 8];
+                if reader.read_exact(&mut header).await.is_err() {
+                    break;
+                }
+                let stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+                let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+                let mut payload = vec![0u8; len];
+                if len > 0 && reader.read_exact(&mut payload).await.is_err() {
+                    break;
+                }
+                let mut map = p.lock().await;
+                if let Some(tx) = map.remove(&stream_id) {
+                    let _ = tx.send(payload);
+                }
+            }
+        });
+
+        Ok(Self {
+            writer: writer_handle,
+            next_id: Arc::new(AtomicU32::new(1)),
+            _reader_handle: reader_handle,
+            pending,
+        })
+    }
+
+    /// Open a virtual stream: sends `payload`, returns the response.
+    pub(crate) async fn open_stream(&self, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+        let stream_id = self.next_id.fetch_add(2, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(stream_id, tx);
+        self.writer.send(stream_id, payload)?;
+        rx.await.map_err(|_| "mux response lost".to_string())
+    }
+}
