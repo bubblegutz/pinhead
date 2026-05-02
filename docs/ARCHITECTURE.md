@@ -168,19 +168,14 @@ flowchart TB
     subgraph Accept["TCP Listener"]
         S[TcpListener] --> ACC[accept]
     end
-    ACC --> SPAWN["tokio::spawn"]
-    SPAWN -->|russh handles auth| SESSION[SshSession\nper-connection Handler]
-    SESSION -->|sfp subsystem| CHAN["Channel<Msg>"]
-    CHAN --> SFTP["SFTP Request Loop"]
-    SFTP -->|"FsOperation::Read"| REQ["mpsc::Sender<Request> → Router"]
-    SFTP -->|"FsOperation::Write"| REQ
-    SFTP -->|"FsOperation::ReadDir"| REQ
-    SFTP -->|"FsOperation::Create"| REQ
-    SFTP -->|"FsOperation::Remove"| REQ
-    SFTP -->|"FsOperation::Rename"| REQ
-    SFTP -->|"FsOperation::MkDir"| REQ
-    SFTP -->|"FsOperation::Stat"| REQ
+    ACC --> SP["tokio::spawn"]
+    SP -->|russh handles auth| SS[SshSession]
+    SS -->|SFTP subsystem| SFTP[SFTP Request Loop]
+    SFTP -->|FsOperation| REQ["Router"]
+    REQ -->|HandlerResponse| SFTP
+    SFTP -->|SFTP protocol response| SS
 ```
+
 
 ### FUSE (per mount point)
 
