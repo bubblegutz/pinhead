@@ -101,18 +101,24 @@ struct SshServer {
     password: Option<String>,
     authorized_keys: Vec<VerifyingKey>,
     userpasswds: Vec<(String, String)>,
+    sem: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Server for SshServer {
     type Handler = SshSession;
 
     fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> Self::Handler {
+        // Non-blocking acquire.  If max_conns is reached, the connection
+        // is dropped (SSH's new_client is synchronous, can't await).
+        let permit = self.sem.as_ref()
+            .and_then(|s| s.clone().try_acquire_owned().ok());
         SshSession {
             router_tx: self.router_tx.clone(),
             authorized_keys: self.authorized_keys.clone(),
             password: self.password.clone(),
             userpasswds: self.userpasswds.clone(),
             channels: HashMap::new(),
+            _permit: permit,
         }
     }
 }
@@ -126,6 +132,8 @@ struct SshSession {
     userpasswds: Vec<(String, String)>,
     /// Channels awaiting subsystem requests, indexed by ChannelId.
     channels: HashMap<ChannelId, Channel<Msg>>,
+    /// Semaphore permit held for this connection's lifetime.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Handler for SshSession {
@@ -760,6 +768,8 @@ pub struct SshfsConfig {
     pub authorized_keys_path: Option<String>,
     /// Username/password pairs for per-user authentication.
     pub userpasswds: Vec<(String, String)>,
+    /// Max concurrent connections (None = unlimited). Queues beyond limit.
+    pub max_conns: Option<usize>,
 }
 
 /// Start an SSH/SFTP server on the given TCP address using `russh`.
@@ -797,6 +807,7 @@ pub async fn serve(
         password: config.password,
         authorized_keys,
         userpasswds: config.userpasswds,
+        sem: config.max_conns.map(|n| Arc::new(tokio::sync::Semaphore::new(n))),
     };
 
     server.run_on_socket(russh_config, &listener).await

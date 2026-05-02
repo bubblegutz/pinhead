@@ -164,6 +164,7 @@ async fn main() {
                 password: cfg.sshfs_password.clone(),
                 authorized_keys_path: cfg.sshfs_authorized_keys_path.clone(),
                 userpasswds: cfg.sshfs_userpasswds.clone(),
+                max_conns: cfg.sshfs_max_conns,
             };
             let h = tokio::spawn(async move {
                 if let Err(e) = frontend::sshfs::serve(tx, &addr, sshfs_cfg).await {

@@ -4,7 +4,6 @@
 //! Session state (fid/qid tracking) is managed internally.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1494,75 +1493,4 @@ pub(crate) async fn run_server_mux<S>(
         let _ = stream_tx.send((stream_id, payload));
     }
     drop(stream_tx);
-}
-
-/// A multiplexed client connection using the 9P mux protocol.
-pub(crate) struct MuxClient {
-    writer: MuxWriter,
-    next_id: Arc<AtomicU32>,
-    _reader_handle: tokio::task::JoinHandle<()>,
-    pending: Arc<Mutex<HashMap<u32, oneshot::Sender<Vec<u8>>>>>,
-}
-
-impl MuxClient {
-    /// Connect to a mux server.
-    pub(crate) async fn connect(addr: &str) -> Result<Self, String> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| format!("mux connect {addr}: {e}"))?;
-        let (reader, writer) = tokio::io::split(stream);
-        let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
-        let writer_handle = MuxWriter { tx: frame_tx };
-        let pending = Arc::new(Mutex::new(HashMap::<u32, oneshot::Sender<Vec<u8>>>::new()));
-
-        let mut writer = writer;
-        let _write_handle = tokio::spawn(async move {
-            while let Some((stream_id, payload)) = frame_rx.recv().await {
-                let mut buf = Vec::with_capacity(8 + payload.len());
-                buf.extend_from_slice(&stream_id.to_le_bytes());
-                buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-                buf.extend_from_slice(&payload);
-                if writer.write_all(&buf).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let p = pending.clone();
-        let reader_handle = tokio::spawn(async move {
-            let mut reader = reader;
-            loop {
-                let mut header = [0u8; 8];
-                if reader.read_exact(&mut header).await.is_err() {
-                    break;
-                }
-                let stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
-                let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-                let mut payload = vec![0u8; len];
-                if len > 0 && reader.read_exact(&mut payload).await.is_err() {
-                    break;
-                }
-                let mut map = p.lock().await;
-                if let Some(tx) = map.remove(&stream_id) {
-                    let _ = tx.send(payload);
-                }
-            }
-        });
-
-        Ok(Self {
-            writer: writer_handle,
-            next_id: Arc::new(AtomicU32::new(1)),
-            _reader_handle: reader_handle,
-            pending,
-        })
-    }
-
-    /// Open a virtual stream: sends `payload`, returns the response.
-    pub(crate) async fn open_stream(&self, payload: Vec<u8>) -> Result<Vec<u8>, String> {
-        let stream_id = self.next_id.fetch_add(2, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(stream_id, tx);
-        self.writer.send(stream_id, payload)?;
-        rx.await.map_err(|_| "mux response lost".to_string())
-    }
 }
