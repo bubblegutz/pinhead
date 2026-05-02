@@ -15,13 +15,11 @@ fn raw_ninep_sock(sock: &str) -> Result<NinepClient, String> {
 
 #[test]
 fn basic_read() {
-    let id = unique_id();
-    let sock = format!("/tmp/pinhead-e2e-base-{:x}.sock", id);
-    let t = Transport::NinepSock(sock);
-    let mut inst = PinheadInstance::start(SCRIPT, &t).expect("start");
-    let mut client = inst.connect().expect("connect");
-    let text = client.read_file("testfile.txt").expect("read");
-    assert_eq!(text, "hello from pinhead test!");
+    let sock = format!("/tmp/pinhead-e2e-base-{:x}.sock", unique_id());
+    with_instance(SCRIPT, &Transport::NinepSock(sock), |client| {
+        let text = client.read_file("testfile.txt").expect("read");
+        assert_eq!(text, "hello from pinhead test!");
+    });
 }
 
 #[test]

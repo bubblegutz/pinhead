@@ -1083,3 +1083,18 @@ pub fn run_scenarios(
         test_fn(&mut *client);
     }
 }
+
+/// Start an instance, connect, call `test_fn`, then drop (cleanup).
+/// Panics on start/connect failure.  Simpler than `run_scenarios` when
+/// you only need one transport.
+pub fn with_instance(
+    script: &str,
+    transport: &Transport,
+    test_fn: impl FnOnce(&mut dyn TestClient),
+) {
+    let mut inst = PinheadInstance::start(script, transport)
+        .expect("start pinhead");
+    let mut client = inst.connect()
+        .expect("connect to pinhead");
+    test_fn(&mut *client);
+}
