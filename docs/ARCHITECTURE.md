@@ -79,19 +79,19 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Dispatcher["dispatcher_loop"]
-        RX["Receiver<HandlerRequest>"] --> ROUND["Round-robin select"]
-        ROUND -->|mpsc::UnboundedSender| W1Q
-        ROUND -->|mpsc::UnboundedSender| W2Q
-        ROUND -->|mpsc::UnboundedSender| WNQ
+        RX["Receiver<HandlerRequest>"] --> SELECT["Round-robin select"]
+        SELECT -->|mpsc::UnboundedSender| Q1
+        SELECT -->|mpsc::UnboundedSender| Q2
+        SELECT -->|mpsc::UnboundedSender| QN
     end
 
-    W1Q --> L1["Worker 1\ncall_lua"]
-    W2Q --> L2["Worker 2\ncall_lua"]
-    WNQ --> LN["Worker N\ncall_lua"]
+    Q1 --> W1["Worker 1\ncall_lua"]
+    Q2 --> W2["Worker 2\ncall_lua"]
+    QN --> WN["Worker N\ncall_lua"]
 
-    L1 -->|oneshot::Sender| ROUND
-    L2 -->|oneshot::Sender| ROUND
-    Ln -->|oneshot::Sender| ROUND
+    W1 -->|oneshot::Sender| SELECT
+    W2 -->|oneshot::Sender| SELECT
+    WN -->|oneshot::Sender| SELECT
 ```
 
 ### 9P TCP Mux (per connection)
