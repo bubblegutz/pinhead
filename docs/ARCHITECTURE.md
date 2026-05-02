@@ -67,8 +67,8 @@ flowchart LR
     subgraph ROUTER["router::run_router (single task)"]
         RX["mpsc::Receiver<Request>"] --> MATCH["matchit::Router.at(path)"]
         MATCH --> HLOOKUP["RouteMeta.handlers.get(op)"]
-        HLOOKUP --> HREQ["mpsc::Sender<HandlerRequest> → Worker Pool"]
-        HREQ --> ONESHOT["oneshot::Sender<Response> → Frontend"]
+        HLOOKUP --> HREQ["mpsc::Sender<HandlerRequest> > Worker Pool"]
+        HREQ --> ONESHOT["oneshot::Sender<Response> > Frontend"]
     end
 
     ONESHOT -->|Response| FRONT
@@ -98,28 +98,25 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph TCP["TCP Connection"]
+    subgraph Conn["TCP Connection"]
         S[TcpStream]
     end
 
-    subgraph Mux["9P Mux Server"]
+    subgraph Mux["Mux Layer"]
         S -->|tokio::io::split| READER[Reader Task]
-        S -->|tokio::io::split| WRITERT[Writer Task]
+        S -->|tokio::io::split| WRITER[Writer Task]
+        READER --> FRAMES["read mux frames"]
+        FRAMES --> DISPATCH["Stream Dispatcher"]
+        DISPATCH --> CHAN["MuxStream"]
+        WRITER -->|encode_mux_frame| S
+    end
 
-        READER -->|read 8-byte frame header| PARSE["decode_mux_header"]
-        PARSE -->|read payload| STXDISPATCH
-
-        STXDISPATCH -->|stream_id exists| EXISTING["mpsc::UnboundedSender\n(per-stream channel)"]
-        STXDISPATCH -->|new stream_id| NEWSTREAM["create MuxStream\nmpsc::Receiver + MuxWriter"]
-        NEWSTREAM --> SPAWN["tokio::spawn\nrun_connection(MuxStream, Shared)"]
-
-        subgraph StreamN["Per-Stream 9P Session"]
-            MUXS[MuxStream] -->|read_exact| H9P[handle_message]
-            H9P -->|send_reply → MuxWriter::send| WRITERT
-            H9P -->|loop back| MUXS
-        end
-
-        WRITERT -->|encode_mux_frame| S
+    subgraph NineP["9P Session (same as Unix socket)"]
+        CHAN --> RUN["run_connection(MuxStream)"]
+        RUN --> HANDLE["handle_message"]
+        HANDLE --> ROUTER["Router -> Worker -> response"]
+        ROUTER -->|MuxWriter::send| WRITER
+        HANDLE -->|loop| RUN
     end
 ```
 
@@ -151,14 +148,14 @@ flowchart LR
     subgraph T["TLS Handshake"]
         S[TcpStream] -->|acceptor.accept| TLS[tokio_rustls::TlsStream]
     end
-    TLS -->|run_connection| R["9P Session\n(version → attach → walk → open → read → clunk)"]
+    TLS -->|run_connection| R["9P Session\n(version > attach > walk > open > read > clunk)"]
 ```
 
 ### 9P Unix Socket (per connection)
 
 ```mermaid
 flowchart LR
-    U[UnixStream] -->|run_connection| R["9P Session\n(version → attach → walk → open → read → clunk)"]
+    U[UnixStream] -->|run_connection| R["9P Session\n(version > attach > walk > open > read > clunk)"]
 ```
 
 ### SSH/SFTP (per connection)
@@ -196,9 +193,9 @@ flowchart TB
         SEND["send_req(FsOperation, path, data)"]
     end
 
-    subgraph Bridge["Sync→Async Bridge"]
+    subgraph Bridge["Sync>Async Bridge"]
         SEND --> BLOCK["blocking_send(Request)"]
-        BLOCK -->|mpsc::Sender| RTR["→ Router"]
+        BLOCK -->|mpsc::Sender| RTR["> Router"]
         SEND --> WAIT["block_on(reply_rx)"]
         WAIT -->|oneshot::Receiver| REPLY["return response\nto FUSE kernel"]
     end
