@@ -11,66 +11,176 @@ flowchart TB
     end
 
     subgraph Frontend["Frontends (runtime)"]
-        FUSE[FUSE\nmpsc::Sender<Request>]
-        P9S[9P Unix\nmpsc::Sender<Request>]
-        P9T[9P TCP mux\nmpsc::Sender<Request>]
-        P9L[9P TLS\nmpsc::Sender<Request>]
-        SSH[SSH/SFTP\nmpsc::Sender<Request>]
+        FUSE[FUSE]
+        P9S[9P Unix]
+        P9T[9P TCP mux]
+        P9L[9P TLS]
+        SSH[SSH/SFTP]
+    end
+
+    subgraph Router["Path Router"]
+        RR[router::run_router] --> MATCH[matchit trie lookup]
+        MATCH --> WH[Worker Pool]
+    end
+
+    subgraph Workers["Worker Pool"]
+        DISPATCH[dispatcher_loop] --> W1[Worker 1]
+        DISPATCH --> W2[Worker 2]
+        DISPATCH --> WN[Worker N]
+    end
+
+    subgraph Store["Store (doc.* / sql.*)"]
+        LUA_CALL[Lua handler\ncalls doc.set / sql.query] --> WT[Writer task\nrusqlite]
+        LUA_CALL --> RT[Reader task\nrusqlite]
     end
 
     subgraph Mux["9P TCP Mux (per connection)"]
         direction TB
-        ACC[Accept] --> SPAWN["tokio::spawn"]
-        SPAWN --> READER["Reader task\nreads mux frames"]
-        SPAWN --> WRITER["Writer task\nsends frames on TCP"]
-        READER -->|mpsc::UnboundedSender| STXDISPATCH["serve_tcp dispatcher"]
-        STXDISPATCH -->|per-stream channel| MUXS["MuxStream\nmpsc::Receiver"]
-        BUNDLE["Bundle: run_connection\nMuxStream + Shared"] -->|MuxWriter::send| WRITER
-    end
-
-    subgraph Router["Path Router"]
-        direction TB
-        RR[router::run_router] -->|mpsc::Receiver<Request>| MATCH["matchit trie lookup"]
-        MATCH -->|mpsc::Sender<HandlerRequest>| WH["Worker Pool"]
-        MATCH -->|oneshot::Sender| RESP["send response back\nto frontend"]
-    end
-
-    subgraph Workers["Worker Pool"]
-        direction TB
-        DISPATCH["dispatcher_loop"] -->|mpsc::UnboundedSender| W1[Worker 1\nmpsc::Receiver]
-        DISPATCH -->|mpsc::UnboundedSender| W2[Worker 2\nmpsc::Receiver]
-        DISPATCH -->|mpsc::UnboundedSender| WN[Worker N\nmpsc::Receiver]
-        W1 -->|oneshot::Sender| DISPATCH
-        W2 -->|oneshot::Sender| DISPATCH
-        WN -->|oneshot::Sender| DISPATCH
-    end
-
-    subgraph Store["doc.* / sql.* (CSP)"]
-        direction TB
-        LUA_CALL[Lua handler\ncalls doc.set / sql.query] -->|mpsc| WT[Writer task\nspawn_blocking\nrusqlite]
-        LUA_CALL -->|mpsc| RT[Reader task\nspawn_blocking\nrusqlite]
-        WT -->|oneshot| LUA_CALL
-        RT -->|oneshot| LUA_CALL
+        READER[Reader task\nreads mux frames] --> STXDISPATCH[Stream dispatcher]
+        STXDISPATCH --> MUXS[MuxStream]
+        MUXS --> BUNDLE["run_connection\n9P handler"]
+        BUNDLE --> WRITER[Writer task\nsends frames on TCP]
     end
 
     S --> Compile
-    CF -->|SharedBytecodes| Workers
-    CF -->|RouteRegistrations| Router
-    CF -->|Config| Frontend
+    CF --> Workers
+    CF --> Router
+    CF --> Frontend
 
-    FUSE -->|Request| Router
-    P9S -->|Request| Router
-    P9T -->|Request| Router
-    P9L -->|Request| Router
-    SSH -->|Request| Router
+    FUSE --> Router
+    P9S --> Router
+    P9T --> Router
+    P9L --> Router
+    SSH --> Router
+```
 
-    ACC -->|TcpStream| P9T
-    ACC -->|TlsStream| P9L
+---
 
-    subgraph Legend["CSP Primitives"]
-        L1["mpsc::Sender / mpsc::Receiver\n(multi-producer, single-consumer)"]
-        L2["oneshot::Sender / oneshot::Receiver\n(single-shot response)"]
-        L3["tokio::spawn\n(background task)"]
+## Component Details
+
+### Path Router
+
+```mermaid
+flowchart LR
+    subgraph Frontends["Inbound Requests"]
+        FUSE
+        P9SOCK
+        P9TCP
+        P9TLS
+        SSH
+    end
+    subgraph Router["router::run_router (single task)"]
+        RX["mpsc::Receiver<Request>"] --> MATCH["matchit::Router.at(path)"]
+        MATCH --> HLOOKUP["RouteMeta.handlers.get(op)"]
+        HLOOKUP --> HREQ["mpsc::Sender<HandlerRequest>"]
+        HREQ --> WRX["mpsc::Receiver (worker dispatch)"]
+        WRX --> ONESHOT["oneshot::Sender<Response>"]
+    end
+    FUSE -->|blocking_send| RX
+    P9SOCK -->|send| RX
+    P9TCP -->|send| RX
+    P9TLS -->|send| RX
+    SSH -->|send| RX
+    ONESHOT -->|block_on reply_rx| FUSE
+    ONESHOT -->|recv| P9SOCK
+    ONESHOT -->|recv| P9TCP
+    ONESHOT -->|recv| P9TLS
+    ONESHOT -->|recv| SSH
+```
+
+### Worker Pool
+
+```mermaid
+flowchart TB
+    subgraph Dispatcher["dispatcher_loop"]
+        RX["mpsc::Receiver<HandlerRequest>"] --> ROUND["Round-robin select"]
+        ROUND -->|mpsc::UnboundedSender| W1Q
+        ROUND -->|mpsc::UnboundedSender| W2Q
+        ROUND -->|mpsc::UnboundedSender| WNQ
+    end
+
+    subgraph W1["Worker 1 (pinned thread)"]
+        W1Q["mpsc::UnboundedReceiver"] --> L1["Lua::new\nfrom_bytecodes"]
+        L1 --> CALL1["call_lua(HandlerRequest)"]
+        CALL1 -->|oneshot::Sender| ROUND
+    end
+
+    subgraph W2["Worker 2 (pinned thread)"]
+        W2Q --> L2["Lua::new\nfrom_bytecodes"]
+        L2 --> CALL2["call_lua(HandlerRequest)"]
+        CALL2 --> ROUND
+    end
+
+    subgraph WN["Worker N (pinned thread)"]
+        WNQ --> LN["Lua::new\nfrom_bytecodes"]
+        LN --> CALLN["call_lua(HandlerRequest)"]
+        CALLN --> ROUND
     end
 ```
 
+### 9P TCP Mux (per connection)
+
+```mermaid
+flowchart TB
+    subgraph TCP["TCP Connection"]
+        S[TcpStream]
+    end
+
+    subgraph Mux["9P Mux Server"]
+        S -->|tokio::io::split| READER[Reader Task]
+        S -->|tokio::io::split| WRITERT[Writer Task]
+
+        READER -->|read 8-byte frame header| PARSE["decode_mux_header"]
+        PARSE -->|read payload| STXDISPATCH
+
+        STXDISPATCH -->|stream_id exists| EXISTING["mpsc::UnboundedSender\n(per-stream channel)"]
+        STXDISPATCH -->|new stream_id| NEWSTREAM["create MuxStream\nmpsc::Receiver + MuxWriter"]
+        NEWSTREAM --> SPAWN["tokio::spawn\nrun_connection(MuxStream, Shared)"]
+
+        subgraph StreamN["Per-Stream 9P Session"]
+            MUXS[MuxStream] -->|read_exact| H9P[handle_message]
+            H9P -->|send_reply → MuxWriter::send| WRITERT
+            H9P -->|loop back| MUXS
+        end
+
+        WRITERT -->|encode_mux_frame| S
+    end
+```
+
+### Store (doc.* / sql.*)
+
+```mermaid
+flowchart LR
+    subgraph Lua["Lua Handler"]
+        DOCSET["doc.set(handle, key, value)"]
+        SQLQRY["sql.query(handle, sql, params)"]
+    end
+
+    subgraph CSP["Background Tasks"]
+        WT["Writer Task\nspawn_blocking\nrusqlite Connection"]
+        RT["Reader Task\nspawn_blocking\nrusqlite Connection"]
+    end
+
+    DOCSET -->|"mpsc::Sender<WriteRequest>"| WT
+    WT -->|"oneshot::Sender<Result>"| DOCSET
+
+    SQLQRY -->|"mpsc::Sender<ReadRequest>"| RT
+    RT -->|"oneshot::Sender<Result>"| SQLQRY
+```
+
+### 9P TLS (per connection)
+
+```mermaid
+flowchart LR
+    subgraph T["TLS Handshake"]
+        S[TcpStream] -->|acceptor.accept| TLS[tokio_rustls::TlsStream]
+    end
+    TLS -->|run_connection| R["9P Session\n(version → attach → walk → open → read → clunk)"]
+```
+
+### 9P Unix Socket (per connection)
+
+```mermaid
+flowchart LR
+    U[UnixStream] -->|run_connection| R["9P Session\n(version → attach → walk → open → read → clunk)"]
+```
