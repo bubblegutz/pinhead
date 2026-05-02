@@ -97,10 +97,41 @@ fn fuse_basic_read() {
     let id = unique_id();
     let fuse_path = format!("/tmp/pinhead-e2e-fuse-{:x}", id);
     let t = Transport::Fuse(fuse_path.clone());
-    let mut inst = PinheadInstance::start(SCRIPT, &t).expect("start");
+    let _inst = PinheadInstance::start(SCRIPT, &t).expect("start");
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let content = std::fs::read_to_string(format!("{fuse_path}/testfile.txt"))
         .expect("FUSE read testfile.txt");
     assert_eq!(content, "hello from pinhead test!");
+}
+
+// ── FUSE: concurrent writes via mount point ─────────────────────────────
+
+#[test]
+fn fuse_concurrent_writes() {
+    let id = unique_id();
+    let fuse_path = format!("/tmp/pinhead-e2e-fuse-concur-{:x}", id);
+
+    // Use Wikipedia example which has bookmark write/read via doc store.
+    let script = include_str!("../examples/wikipedia/main.lua");
+    let t = Transport::Fuse(fuse_path.clone());
+    let _inst = PinheadInstance::start(script, &t).expect("start");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let n_threads = 4;
+    let mut handles = Vec::new();
+    for i in 0..n_threads {
+        let fp = fuse_path.clone();
+        handles.push(std::thread::spawn(move || {
+            let key = format!("concurrent-{i}");
+            let val = format!("value-{i}-from-thread");
+            std::fs::write(format!("{fp}/bookmarks/{key}"), &val).expect("write");
+            let readback = std::fs::read_to_string(format!("{fp}/bookmarks/{key}")).expect("read");
+            assert!(readback.contains(&val), "thread {i}: got {readback:?}");
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("thread panicked");
+    }
 }

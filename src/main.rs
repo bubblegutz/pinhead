@@ -125,6 +125,21 @@ async fn main() {
                     }
                 });
                 frontend_handles.push(h);
+            } else if let Some(addr) = listener.strip_prefix("tls:") {
+                let addr = addr.to_string();
+                let cert = cfg.tls_cert_path.clone();
+                let key = cfg.tls_key_path.clone();
+                let h = tokio::spawn(async move {
+                    match (cert, key) {
+                        (Some(c), Some(k)) => {
+                            if let Err(e) = frontend::ninep::serve_tcp_tls(tx, &addr, &c, &k).await {
+                                eprintln!("[9p-tls] error: {e}");
+                            }
+                        }
+                        _ => eprintln!("[9p-tls] tls: address requires ninep.tls_cert() and ninep.tls_key()"),
+                    }
+                });
+                frontend_handles.push(h);
             } else if let Some(addr) = listener.strip_prefix("udp:") {
                 let addr = addr.to_string();
                 let h = tokio::spawn(async move {

@@ -81,13 +81,29 @@ pub struct RouteRegistration {
 
 /// Configuration values set by the Lua script via `fuse.*()` / `ninep.*()` / `sshfs.*()`.
 #[derive(Debug, Default, Clone)]
+/// Configuration collected from the Lua script during compilation.
+///
+/// Returned by [`compile()`].  Contains all frontend addresses, auth
+/// credentials, and TLS certificate paths extracted from the Lua
+/// configuration calls (e.g. `ninep.listen`, `sshfs.userpasswd`).
 pub struct Config {
+    /// FUSE mount points, set via `fuse.mount(path)` in Lua.
     pub fuse_mounts: Vec<String>,
+    /// 9P listener addresses, set via `ninep.listen(addr)` in Lua.
+    /// Prefixes: `sock:/path`, `tcp:host:port`, `udp:host:port`, `tls:host:port`.
     pub ninep_listeners: Vec<String>,
+    /// SSH/SFTP listener addresses, set via `sshfs.listen(addr)`.
     pub sshfs_listeners: Vec<String>,
+    /// SSH password, set via `sshfs.password(pw)`.
     pub sshfs_password: Option<String>,
+    /// Path to authorized_keys file for SSH public-key auth.
     pub sshfs_authorized_keys_path: Option<String>,
+    /// SSH user/password pairs, set via `sshfs.userpasswd(user, pass)`.
     pub sshfs_userpasswds: Vec<(String, String)>,
+    /// Path to TLS certificate PEM file, set via `ninep.tls_cert(path)`.
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS private key PEM file, set via `ninep.tls_key(path)`.
+    pub tls_key_path: Option<String>,
 }
 
 /// Compiled bytecode for all registered Lua handler functions, plus the
@@ -167,6 +183,8 @@ impl HandlerRuntime {
         let sshfs_password: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let sshfs_authorized_keys_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let sshfs_userpasswds: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let tls_cert_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let tls_key_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // ── Build the `route` table ──────────────────────────────────────
         {
@@ -425,6 +443,34 @@ end
                     .map_err(|e| format!("{e}"))?;
             }
 
+            // ninep.tls_cert(path)
+            {
+                let cert_path = tls_cert_path.clone();
+                let fn_ = lua
+                    .create_function(move |_, path: String| {
+                        *cert_path.lock().unwrap() = Some(path);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                ninep_table
+                    .set("tls_cert", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
+            // ninep.tls_key(path)
+            {
+                let key_path = tls_key_path.clone();
+                let fn_ = lua
+                    .create_function(move |_, path: String| {
+                        *key_path.lock().unwrap() = Some(path);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                ninep_table
+                    .set("tls_key", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
             lua.globals()
                 .set("ninep", ninep_table)
                 .map_err(|e| format!("{e}"))?;
@@ -591,6 +637,8 @@ end
             sshfs_password: sshfs_password.lock().unwrap().clone(),
             sshfs_authorized_keys_path: sshfs_authorized_keys_path.lock().unwrap().clone(),
             sshfs_userpasswds: sshfs_userpasswds.lock().unwrap().clone(),
+            tls_cert_path: tls_cert_path.lock().unwrap().clone(),
+            tls_key_path: tls_key_path.lock().unwrap().clone(),
         };
 
         // ── Build SharedBytecodes ──────────────────────────────────────────

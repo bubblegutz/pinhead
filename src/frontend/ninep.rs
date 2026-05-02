@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::CertificateDer;
 use std::sync::Arc as StdArc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
@@ -187,6 +187,10 @@ struct Shared {
 ///
 /// For each incoming connection, a new task is spawned to handle the 9P
 /// protocol, forwarding filesystem operations to the pinhead router.
+/// Start a 9P2000 server on a Unix socket.
+///
+/// Each connection runs a single 9P session (version → attach → ...).
+/// The path is cleaned up on exit via [`SocketCleanup`].
 pub async fn serve(
     router_tx: mpsc::Sender<Request>,
     socket_path: &str,
