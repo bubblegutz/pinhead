@@ -2,7 +2,6 @@
 
 mod common;
 use common::*;
-use std::process::Command;
 use std::time::Duration;
 
 #[test]
@@ -44,8 +43,8 @@ fn wikipedia_all_routes() {
         // FUSE only: bookmark write/read via direct IO
         if matches!(t, Transport::Fuse(_)) {
             let m = &fuse_path;
-            std::fs::write(&format!("{m}/bookmarks/x"), "Wikipedia bookmark").expect("write");
-            let content = std::fs::read_to_string(&format!("{m}/bookmarks/x")).expect("read");
+            std::fs::write(format!("{m}/bookmarks/x"), "Wikipedia bookmark").expect("write");
+            let content = std::fs::read_to_string(format!("{m}/bookmarks/x")).expect("read");
             assert!(content.contains("Wikipedia"), "bookmark: {content}");
         }
     }

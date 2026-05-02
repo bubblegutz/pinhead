@@ -510,8 +510,7 @@ impl SftpSession {
         let h_resp = timeout(Duration::from_secs(60), reply_rx)
             .await
             .map_err(|_| "handler timeout (60s)".to_string())?
-            .map_err(|_| "handler gone".to_string())?
-            .map_err(|e| e)?;
+            .map_err(|_| "handler gone".to_string())??;
         Ok(h_resp.data)
     }
 
@@ -820,15 +819,14 @@ fn load_authorized_keys(path: &str) -> Result<Vec<VerifyingKey>, String> {
             continue;
         }
 
-        if let Ok(key_bytes) = simple_base64_decode(parts[1]) {
-            if key_bytes.len() == 32 {
+        if let Ok(key_bytes) = simple_base64_decode(parts[1])
+            && key_bytes.len() == 32 {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&key_bytes);
                 if let Ok(vk) = VerifyingKey::from_bytes(&arr) {
                     keys.push(vk);
                 }
             }
-        }
     }
 
     Ok(keys)

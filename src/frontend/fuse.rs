@@ -98,7 +98,7 @@ impl FuseFilesystem {
         FileAttr {
             ino: INodeNo(ino),
             size,
-            blocks: (size + 511) / 512,
+            blocks: size.div_ceil(512),
             atime: now,
             mtime: now,
             ctime: now,
@@ -144,7 +144,7 @@ impl Filesystem for FuseFilesystem {
         let name = name.to_string_lossy().to_string();
         if name == "." || name == ".." {
             let attr = if parent == INodeNo(1) {
-                self.root_attr.clone()
+                self.root_attr
             } else {
                 let _p = self.path_for(parent.0).unwrap_or_default();
                 self.file_attr(parent.0, 0, true)

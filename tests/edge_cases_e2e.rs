@@ -75,11 +75,10 @@ fn concurrent_reads() {
         handles.push(std::thread::spawn(move || {
             let mut client = raw_ninep_sock(&a).expect("connect");
             for _ in 0..reads_per {
-                if let Ok(text) = client.read_file("testfile.txt") {
-                    if text == "hello from pinhead test!" {
+                if let Ok(text) = client.read_file("testfile.txt")
+                    && text == "hello from pinhead test!" {
                         ok.fetch_add(1, Ordering::SeqCst);
                     }
-                }
             }
         }));
     }

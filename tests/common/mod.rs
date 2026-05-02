@@ -292,11 +292,10 @@ pub fn wait_for_fuse_mount(path: &str) -> Result<(), String> {
     let start = Instant::now();
     // First wait for the mount directory to exist.
     loop {
-        if let Ok(m) = std::fs::metadata(path) {
-            if m.is_dir() {
+        if let Ok(m) = std::fs::metadata(path)
+            && m.is_dir() {
                 break;
             }
-        }
         if start.elapsed() > Duration::from_secs(5) {
             return Err(format!("fuse mount dir {path} did not appear within 5s"));
         }
@@ -304,11 +303,10 @@ pub fn wait_for_fuse_mount(path: &str) -> Result<(), String> {
     }
     // Then wait for the FUSE mount to appear in /proc/mounts.
     loop {
-        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-            if mounts.lines().any(|line| line.contains(path)) {
+        if let Ok(mounts) = std::fs::read_to_string("/proc/mounts")
+            && mounts.lines().any(|line| line.contains(path)) {
                 return Ok(());
             }
-        }
         if start.elapsed() > Duration::from_secs(5) {
             return Err(format!("fuse mount {path} did not appear in /proc/mounts within 5s"));
         }
@@ -354,7 +352,7 @@ pub fn decode_string(data: &[u8]) -> (String, &[u8]) {
     (s, &data[2 + actual_len..])
 }
 
-pub fn read_data<'a>(resp: &'a [u8]) -> &'a [u8] {
+pub fn read_data(resp: &[u8]) -> &[u8] {
     if resp.len() < 4 {
         return &[];
     }

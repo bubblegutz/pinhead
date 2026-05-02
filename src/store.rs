@@ -107,6 +107,12 @@ pub struct DbRegistry {
     next_id: u64,
 }
 
+impl Default for DbRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DbRegistry {
     pub fn new() -> Self {
         Self {
@@ -207,14 +213,9 @@ fn run_reader_conn(
     conn: rusqlite::Connection,
     rx: mpsc::Receiver<ReadRequest>,
 ) {
-    loop {
-        match rx.recv() {
-            Ok(ReadRequest::Query { sql, params, reply }) => {
-                let result = query_sql(&conn, &sql, &params);
-                let _ = reply.send(result);
-            }
-            Err(_) => break,
-        }
+    while let Ok(ReadRequest::Query { sql, params, reply }) = rx.recv() {
+        let result = query_sql(&conn, &sql, &params);
+        let _ = reply.send(result);
     }
 }
 
@@ -344,6 +345,9 @@ pub(crate) fn send_close_writer(tx: &mpsc::Sender<WriteRequest>) -> Result<(), S
 // Lua API registration
 // ---------------------------------------------------------------------------
 
+/// Type alias for the (doc_reg, sql_reg) pair returned by register_lua_apis.
+type RegPair = (Arc<Mutex<DbRegistry>>, Arc<Mutex<DbRegistry>>);
+
 /// Register `doc.*` and `sql.*` Lua tables.  Called from `HandlerRuntime::new`.
 /// Both doc and sql use the same registry so handles created by doc.open()
 /// can be used with sql.query() and vice-versa.
@@ -351,7 +355,7 @@ pub(crate) fn send_close_writer(tx: &mpsc::Sender<WriteRequest>) -> Result<(), S
 /// can be used with sql.query() and vice-versa.
 pub fn register_lua_apis(
     lua: &mlua::Lua,
-) -> Result<(Arc<Mutex<DbRegistry>>, Arc<Mutex<DbRegistry>>), String> {
+) -> Result<RegPair, String> {
     let reg = Arc::new(Mutex::new(DbRegistry::new()));
 
     register_doc_api(lua, reg.clone())?;
@@ -374,7 +378,7 @@ fn get_handle(
 
 /// Map a Result<T, String> to Result<T, mlua::Error>.
 fn map_err<T>(r: Result<T, String>) -> Result<T, mlua::Error> {
-    r.map_err(|e| mlua::Error::RuntimeError(e.into()))
+    r.map_err(mlua::Error::RuntimeError)
 }
 
 fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), String> {
@@ -391,7 +395,7 @@ fn register_doc_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                     })?;
                     let h = r
                         .open(&path, Some("CREATE TABLE IF NOT EXISTS docs (key TEXT PRIMARY KEY, value TEXT)"))
-                        .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
+                        .map_err(mlua::Error::RuntimeError)?;
                     Ok(h.id as i64)
                 }));
                 match r {
@@ -591,7 +595,7 @@ fn register_sql_api(lua: &mlua::Lua, reg: Arc<Mutex<DbRegistry>>) -> Result<(), 
                     })?;
                     let h = r
                         .open(&path, None)
-                        .map_err(|e| mlua::Error::RuntimeError(e.into()))?;
+                        .map_err(mlua::Error::RuntimeError)?;
                     Ok(h.id as i64)
                 }));
                 match r {

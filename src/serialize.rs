@@ -23,6 +23,7 @@ use serde_json::Value as Json;
 
 // ── Lua ↔ serde_json::Value conversion ──────────────────────────────────────
 
+#[allow(clippy::only_used_in_recursion)]
 pub(crate) fn lua_to_json(lua: &mlua::Lua, val: mlua::Value) -> Result<Json, String> {
     match val {
         mlua::Value::Nil => Ok(Json::Null),
@@ -165,7 +166,7 @@ pub fn toml_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Val
 // Encode: input is array of tables (each row = one table with string keys).
 // Decode: output is array of tables, keys from header row.
 
-pub fn csv_encode<'lua>(lua: &'lua mlua::Lua, val: mlua::Value) -> Result<String, String> {
+pub fn csv_encode(lua: &mlua::Lua, val: mlua::Value) -> Result<String, String> {
     let j = lua_to_json(lua, val)?;
     let rows = match &j {
         Json::Array(arr) => arr,
@@ -230,9 +231,8 @@ pub fn csv_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Valu
         .collect();
 
     let result_t = lua.create_table().map_err(|e| e.to_string())?;
-    let mut idx: i64 = 1;
 
-    for row in rdr.records() {
+    for (idx, row) in rdr.records().enumerate() {
         let rec = row.map_err(|e| format!("CSV error: {e}"))?;
         let row_t = lua.create_table().map_err(|e| e.to_string())?;
         for (i, field) in rec.iter().enumerate() {
@@ -248,8 +248,7 @@ pub fn csv_decode<'lua>(lua: &'lua mlua::Lua, text: String) -> Result<mlua::Valu
                 row_t.set(key, field).map_err(|e| e.to_string())?;
             }
         }
-        result_t.set(idx, row_t).map_err(|e| e.to_string())?;
-        idx += 1;
+        result_t.set(idx + 1, row_t).map_err(|e| e.to_string())?;
     }
 
     Ok(mlua::Value::Table(result_t))
@@ -383,8 +382,7 @@ pub fn json_jq<'lua>(
             serde_json::from_slice(&buf).map_err(|e| e.to_string())?;
         results.push(sv);
         Ok::<_, String>(())
-    })
-    .map_err(|e| e)?;
+    })?;
 
     // 4. Convert results to Lua value.
     if results.is_empty() {
@@ -446,9 +444,8 @@ pub fn csv_query<'lua>(
         .ok_or_else(|| format!("column '{col}' not found in CSV"))?;
 
     let result_t = lua.create_table().map_err(|e| e.to_string())?;
-    let mut idx: i64 = 1;
 
-    for row in rdr.records() {
+    for (idx, row) in rdr.records().enumerate() {
         let rec = row.map_err(|e| format!("CSV error: {e}"))?;
         let val = rec.get(col_idx).unwrap_or("");
         if val == expected {
@@ -465,8 +462,7 @@ pub fn csv_query<'lua>(
                     row_t.set(key, field).map_err(|e| e.to_string())?;
                 }
             }
-            result_t.set(idx, row_t).map_err(|e| e.to_string())?;
-            idx += 1;
+            result_t.set(idx + 1, row_t).map_err(|e| e.to_string())?;
         }
     }
 

@@ -127,7 +127,7 @@ fn fs_mirror_writes() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = std::fs::metadata(&format!("{root}/modetest")).unwrap();
+            let meta = std::fs::metadata(format!("{root}/modetest")).unwrap();
             let mode = meta.permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "chmod should set 0o600, got {mode:o}");
         }

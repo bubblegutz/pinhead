@@ -110,8 +110,7 @@ fn test_bundle_default() {
     let sock_path = format!("/tmp/pinhead-e2e-bundle-default-{:x}.sock", id);
 
     // Script with a specific route.read and a route.read.default fallback.
-    let script = format!(
-        r#"
+    let script = r#"
 route.read("/specific/readme.txt", function(params, data)
     return "specific content"
 end)
@@ -124,8 +123,7 @@ end)
 
 local a = env.get("PINHEAD_LISTEN") or "sock:/tmp/pinhead-e2e-bd.sock"
 ninep.listen(a)
-"#
-    );
+"#.to_string();
 
     let sock = format!("sock:{}", sock_path);
     let binary = std::env!("CARGO_BIN_EXE_ph");

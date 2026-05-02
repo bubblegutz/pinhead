@@ -1330,7 +1330,7 @@ pub(crate) fn setup_runtime_apis(
             .map_err(|e| format!("{e}"))?;
 
         // Override dofile, loadfile, and setup package.path.
-        lua.load(&format!(
+        lua.load(format!(
             r#"
 do
     local _old_dofile = dofile

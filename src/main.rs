@@ -196,8 +196,8 @@ async fn main() {
 
 fn load_script() -> (String, std::path::PathBuf) {
     // 1. CLI argument (covers shebang invocation and direct invocation).
-    if let Some(path) = std::env::args().nth(1) {
-        if !path.starts_with('-') {
+    if let Some(path) = std::env::args().nth(1)
+        && !path.starts_with('-') {
             match std::fs::read_to_string(&path) {
                 Ok(s) => {
                     let cwd = std::path::Path::new(&path)
@@ -212,7 +212,6 @@ fn load_script() -> (String, std::path::PathBuf) {
                 }
             }
         }
-    }
 
     // 2. Piped input — read from stdin if it is not a terminal.
     use std::io::{IsTerminal, Read};
@@ -243,7 +242,7 @@ fn load_script() -> (String, std::path::PathBuf) {
 /// since mlua loads scripts as strings (not files) and won't skip it.
 fn strip_shebang(script: String) -> String {
     if script.starts_with("#!") {
-        if let Some(rest) = script.splitn(2, '\n').nth(1) {
+        if let Some(rest) = script.split_once('\n').map(|x| x.1) {
             return rest.to_string();
         }
         // Script was only the shebang line — return empty.

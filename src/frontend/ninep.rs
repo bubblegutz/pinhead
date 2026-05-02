@@ -233,12 +233,11 @@ pub async fn serve(
                 }
 
                 let mut body = vec![0u8; body_len];
-                if body_len > 0 {
-                    if let Err(e) = NinepStream::read_exact(&mut stream, &mut body).await {
+                if body_len > 0
+                    && let Err(e) = NinepStream::read_exact(&mut stream, &mut body).await {
                         eprintln!("[9p] read body error: {e}");
                         break;
                     }
-                }
 
                 if let Err(e) = handle_message(&shared, &mut stream, msg_type, tag, &body).await {
                     eprintln!("[9p] handler error: {e}");
@@ -318,7 +317,7 @@ async fn handle_version(
         String::new()
     };
 
-    let msize = msize.min(65536).max(4096);
+    let msize = msize.clamp(4096, 65536);
     *shared.msize.write().await = msize;
 
     let mut reply = Vec::new();
@@ -1192,12 +1191,11 @@ async fn run_connection(stream: impl NinepStream, shared: Arc<Shared>) {
         }
 
         let mut body = vec![0u8; body_len];
-        if body_len > 0 {
-            if let Err(e) = stream.read_exact(&mut body).await {
+        if body_len > 0
+            && let Err(e) = stream.read_exact(&mut body).await {
                 eprintln!("[9p] read body error: {e}");
                 break;
             }
-        }
 
         if let Err(e) = handle_message(&shared, &mut stream, msg_type, tag, &body).await {
             eprintln!("[9p] handler error: {e}");
@@ -1219,7 +1217,7 @@ trait NinepStream: Send {
         &'a mut self,
         buf: &'a [u8],
     ) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
-    fn shutdown<'a>(&'a mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
+    fn shutdown(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> + Send;
 }
 
 impl NinepStream for UnixStream {

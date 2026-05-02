@@ -98,7 +98,7 @@ async fn dispatcher_loop(
                     let _ = req.reply.send(Err("no workers available".into()));
                     continue;
                 }
-                next = next % workers.len();
+                next %= workers.len();
                 if workers[next].0.send(req).is_err() {
                     // Worker died — remove and retry.
                     workers.swap_remove(next);
