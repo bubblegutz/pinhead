@@ -62,30 +62,14 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph Frontends["Frontends (all transports)"]
-        FUSE
-        P9SOCK
-        P9TCP
-        P9TLS
-        SSH
-    end
     subgraph Router["router::run_router (single task)"]
         RX["mpsc::Receiver<Request>"] --> MATCH["matchit::Router.at(path)"]
         MATCH --> HLOOKUP["RouteMeta.handlers.get(op)"]
-        HLOOKUP --> HREQ["mpsc::Sender<HandlerRequest>"]
-        HREQ --> WRX["mpsc::Receiver (worker dispatch)"]
-        WRX --> ONESHOT["oneshot::Sender<Response>"]
+        HLOOKUP --> HREQ["mpsc::Sender<HandlerRequest> → Worker Pool"]
+        HREQ --> ONESHOT["oneshot::Sender<Response> → Frontend"]
     end
-    FUSE -->|blocking_send| RX
-    P9SOCK -->|send| RX
-    P9TCP -->|send| RX
-    P9TLS -->|send| RX
-    SSH -->|send| RX
-    ONESHOT -->|block_on reply_rx| FUSE
-    ONESHOT -->|recv| P9SOCK
-    ONESHOT -->|recv| P9TCP
-    ONESHOT -->|recv| P9TLS
-    ONESHOT -->|recv| SSH
+    FRONT["Frontends\n(FUSE / 9P sock / 9P TCP mux / 9P TLS / SSH)"] -->|Request| RX
+    ONESHOT -->|Response| FRONT
 ```
 
 ### Worker Pool
@@ -96,7 +80,7 @@ flowchart TB
         RX["mpsc::Receiver<HandlerRequest>"] --> ROUND["Round-robin select"]
         ROUND -->|mpsc::UnboundedSender| W1Q
         ROUND -->|mpsc::UnboundedSender| W2Q
-        ROUND -->|mpsc::UnboundedSender| WNQ
+        ROUND -->|mpsc::UnboundedSender| WnQ
     end
 
     subgraph W1["Worker 1 (pinned thread)"]
@@ -106,15 +90,15 @@ flowchart TB
     end
 
     subgraph W2["Worker 2 (pinned thread)"]
-        W2Q --> L2["Lua::new\nfrom_bytecodes"]
+        W2Q["mpsc::UnboundedReceiver"] --> L2["Lua::new\nfrom_bytecodes"]
         L2 --> CALL2["call_lua(HandlerRequest)"]
-        CALL2 --> ROUND
+        CALL2 -->|oneshot::Sender| ROUND
     end
 
-    subgraph WN["Worker N (pinned thread)"]
-        WNQ --> LN["Lua::new\nfrom_bytecodes"]
-        LN --> CALLN["call_lua(HandlerRequest)"]
-        CALLN --> ROUND
+    subgraph Wn["Worker n (pinned thread)"]
+        WnQ["mpsc::UnboundedReceiver"] --> Ln["Lua::new\nfrom_bytecodes"]
+        Ln --> CALLn["call_lua(HandlerRequest)"]
+        CALLn -->|oneshot::Sender| ROUND
     end
 ```
 
