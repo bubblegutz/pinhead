@@ -62,13 +62,15 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph Router["router::run_router (single task)"]
+    FRONT["Frontends\n(FUSE / 9P sock / 9P TCP mux / 9P TLS / SSH)"] -->|Request| ROUTER
+    
+    subgraph ROUTER["router::run_router (single task)"]
         RX["mpsc::Receiver<Request>"] --> MATCH["matchit::Router.at(path)"]
         MATCH --> HLOOKUP["RouteMeta.handlers.get(op)"]
         HLOOKUP --> HREQ["mpsc::Sender<HandlerRequest> → Worker Pool"]
         HREQ --> ONESHOT["oneshot::Sender<Response> → Frontend"]
     end
-    FRONT["Frontends\n(FUSE / 9P sock / 9P TCP mux / 9P TLS / SSH)"] -->|Request| RX
+
     ONESHOT -->|Response| FRONT
 ```
 
