@@ -1138,7 +1138,7 @@ pub async fn serve_tcp(
 
 // ── TLS 9P2000 server ──────────────────────────────────────────────────
 
-/// Start a 9P2000 server over TCP with TLS encryption, then mux.
+/// Start a 9P2000 server over TCP with TLS encryption + mux.
 ///
 /// PEM file must contain the server certificate chain followed by the
 /// private key (in two PEM blocks).  Compatible with standard TLS 1.2+.
@@ -1193,7 +1193,7 @@ pub async fn serve_tcp_tls(
         let acceptor = acceptor.clone();
 
         tokio::spawn(async move {
-            // TLS handshake first, then raw 9P over TLS (no mux).
+            // TLS handshake, then mux over TLS (same as TCP mux).
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1201,7 +1201,31 @@ pub async fn serve_tcp_tls(
                     return;
                 }
             };
-            run_connection(tls_stream, shared).await;
+
+            let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
+            let (frame_tx, frame_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
+            let writer = MuxWriter { tx: frame_tx };
+
+            tokio::spawn(async move {
+                run_server_mux(tls_stream, stream_tx, frame_rx).await;
+            });
+
+            let mut streams: HashMap<u32, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
+            while let Some((stream_id, payload)) = stream_rx.recv().await {
+                if let Some(tx) = streams.get(&stream_id) {
+                    let _ = tx.send(payload);
+                } else {
+                    let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                    let _ = tx.send(payload);
+                    streams.insert(stream_id, tx);
+                    let writer = writer.clone();
+                    let mux = MuxStream { writer, stream_id, rx, buf: Vec::new(), pos: 0 };
+                    let s = shared.clone();
+                    tokio::spawn(async move {
+                        run_connection(mux, s).await;
+                    });
+                }
+            }
         });
     }
 }

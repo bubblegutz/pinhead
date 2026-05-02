@@ -34,7 +34,7 @@ flowchart TB
         LUA_CALL --> RT[Reader task\nrusqlite]
     end
 
-    subgraph Mux["9P TCP Mux (per connection)"]
+    subgraph Mux["9P Mux (TCP / TLS)"]
         direction TB
         READER[Reader task\nreads mux frames] --> STXDISPATCH[Stream dispatcher]
         STXDISPATCH --> MUXS[MuxStream]
@@ -74,6 +74,7 @@ flowchart LR
     ONESHOT -->|Response| FRONT
 ```
 
+
 ### Worker Pool
 
 ```mermaid
@@ -93,6 +94,29 @@ flowchart TB
     W2 -->|oneshot::Sender| SELECT
     WN -->|oneshot::Sender| SELECT
 ```
+
+
+### Store (doc.* / sql.*)
+
+```mermaid
+flowchart LR
+    subgraph Lua["Lua Handler"]
+        DOCSET["doc.set(handle, key, value)"]
+        SQLQRY["sql.query(handle, sql, params)"]
+    end
+
+    subgraph CSP["Background Tasks"]
+        WT["Writer Task\nspawn_blocking\nrusqlite Connection"]
+        RT["Reader Task\nspawn_blocking\nrusqlite Connection"]
+    end
+
+    DOCSET -->|"mpsc::Sender<WriteRequest>"| WT
+    WT -->|"oneshot::Sender<Result>"| DOCSET
+
+    SQLQRY -->|"mpsc::Sender<ReadRequest>"| RT
+    RT -->|"oneshot::Sender<Result>"| SQLQRY
+```
+
 
 ### 9P TCP Mux (per connection)
 
@@ -120,26 +144,6 @@ flowchart TB
     end
 ```
 
-### Store (doc.* / sql.*)
-
-```mermaid
-flowchart LR
-    subgraph Lua["Lua Handler"]
-        DOCSET["doc.set(handle, key, value)"]
-        SQLQRY["sql.query(handle, sql, params)"]
-    end
-
-    subgraph CSP["Background Tasks"]
-        WT["Writer Task\nspawn_blocking\nrusqlite Connection"]
-        RT["Reader Task\nspawn_blocking\nrusqlite Connection"]
-    end
-
-    DOCSET -->|"mpsc::Sender<WriteRequest>"| WT
-    WT -->|"oneshot::Sender<Result>"| DOCSET
-
-    SQLQRY -->|"mpsc::Sender<ReadRequest>"| RT
-    RT -->|"oneshot::Sender<Result>"| SQLQRY
-```
 
 ### 9P TLS (per connection)
 
@@ -151,12 +155,26 @@ flowchart LR
     TLS -->|run_connection| R["9P Session\n(version > attach > walk > open > read > clunk)"]
 ```
 
+
+### 9P UDP (connectionless)
+
+```mermaid
+flowchart LR
+    S[UdpSocket] -->|recv_from| MSG["read 9P message"]
+    MSG --> H["handle_udp_message
+(VirtualStream wrapper)"]
+    H --> R["send response
+back to peer"]
+    R -->|loop| S
+```
+
 ### 9P Unix Socket (per connection)
 
 ```mermaid
 flowchart LR
     U[UnixStream] -->|run_connection| R["9P Session\n(version > attach > walk > open > read > clunk)"]
 ```
+
 
 ### SSH/SFTP (per connection)
 
@@ -172,6 +190,7 @@ flowchart TB
     REQ -->|HandlerResponse| SFTP
     SFTP -->|SFTP protocol response| SS
 ```
+
 
 
 ### FUSE (per mount point)
@@ -200,3 +219,4 @@ flowchart TB
         WAIT -->|oneshot::Receiver| REPLY["return response\nto FUSE kernel"]
     end
 ```
+
