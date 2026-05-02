@@ -1414,6 +1414,23 @@ impl MuxWriter {
     }
 }
 
+/// Build a mux frame: [stream_id:4][payload_len:4][payload...] (all LE).
+pub fn encode_mux_frame(stream_id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8 + payload.len());
+    buf.extend_from_slice(&stream_id.to_le_bytes());
+    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
+
+/// Parse a mux frame header, returning (stream_id, payload_len).
+pub fn decode_mux_header(header: &[u8]) -> (u32, usize) {
+    let stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+    (stream_id, len)
+}
+
 /// A virtual stream backed by the mux protocol.  Reads dequeue from a
 /// channel fed by the mux reader, writes send frames via the mux writer.
 struct MuxStream {
@@ -1468,11 +1485,8 @@ pub(crate) async fn run_server_mux<S>(
 
     tokio::spawn(async move {
         while let Some((stream_id, payload)) = frame_rx.recv().await {
-            let mut buf = Vec::with_capacity(8 + payload.len());
-            buf.extend_from_slice(&stream_id.to_le_bytes());
-            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&payload);
-            if tcp_writer.write_all(&buf).await.is_err() {
+            let frame = encode_mux_frame(stream_id, &payload);
+            if tcp_writer.write_all(&frame).await.is_err() {
                 break;
             }
         }
@@ -1484,8 +1498,7 @@ pub(crate) async fn run_server_mux<S>(
         if reader.read_exact(&mut header).await.is_err() {
             break;
         }
-        let stream_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
-        let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let (stream_id, len) = decode_mux_header(&header);
         let mut payload = vec![0u8; len];
         if len > 0 && reader.read_exact(&mut payload).await.is_err() {
             break;

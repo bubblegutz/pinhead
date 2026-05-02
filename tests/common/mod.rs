@@ -47,11 +47,8 @@ impl Read for MuxedTcpStream {
 
 impl Write for MuxedTcpStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut header = Vec::with_capacity(8 + buf.len());
-        header.extend_from_slice(&1u32.to_le_bytes()); // stream_id
-        header.extend_from_slice(&(buf.len() as u32).to_le_bytes());
-        header.extend_from_slice(buf);
-        self.inner.write_all(&header)?;
+        let frame = pinhead::frontend::ninep::encode_mux_frame(1, buf);
+        self.inner.write_all(&frame)?;
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {

@@ -38,6 +38,95 @@ fn to_lua_str_result<'lua>(
     }
 }
 
+
+// ── Route convenience wrappers (registered in both compile() and from_bytecodes()) ──
+
+/// Create a callable table like `route.read` with a `.default` method.
+/// The table's `__call` invokes `route.register(pattern, ops, func)`.
+fn make_route_bundle<'lua>(
+    lua: &'lua Lua,
+    routes: &Arc<Mutex<Vec<RouteRegistration>>>,
+    funcs: &Arc<Mutex<HashMap<String, RegistryKey>>>,
+    ops: &[&str],
+) -> Result<mlua::Value<'lua>, String> {
+    let table = lua.create_table().map_err(|e| format!("{e}"))?;
+    let ops_owned: Vec<String> = ops.iter().map(|s| s.to_string()).collect();
+
+    // __call: table(path, func) -> register(path, ops, func)
+    {
+        let routes = routes.clone();
+        let funcs = funcs.clone();
+        let ops = ops_owned.clone();
+        let call_fn = lua.create_function(move |lua, (_, pattern, func): (mlua::Value, String, mlua::Function)| {
+            let name = format!("__route_{}", routes.lock().unwrap().len());
+            let key = lua.create_registry_value(func)?;
+            routes.lock().unwrap().push(RouteRegistration {
+                pattern,
+                handler_name: name.clone(),
+                ops: ops.clone(),
+            });
+            funcs.lock().unwrap().insert(name, key);
+            Ok(())
+        }).map_err(|e| format!("{e}"))?;
+
+        let meta = lua.create_table().map_err(|e| format!("{e}"))?;
+        meta.set("__call", call_fn).map_err(|e| format!("{e}"))?;
+        table.set_metatable(Some(meta));
+    }
+
+    // .default(func) -> register("/{*path}", ops, func)
+    {
+        let routes = routes.clone();
+        let funcs = funcs.clone();
+        let ops = ops_owned.clone();
+        let default_fn = lua.create_function(move |lua, func: mlua::Function| {
+            let name = format!("__route_{}", routes.lock().unwrap().len());
+            let key = lua.create_registry_value(func)?;
+            routes.lock().unwrap().push(RouteRegistration {
+                pattern: "/{*path}".to_string(),
+                handler_name: name.clone(),
+                ops: ops.clone(),
+            });
+            funcs.lock().unwrap().insert(name, key);
+            Ok(())
+        }).map_err(|e| format!("{e}"))?;
+        table.set("default", default_fn).map_err(|e| format!("{e}"))?;
+    }
+
+    Ok(mlua::Value::Table(table))
+}
+
+/// Register all convenience wrappers on the global `route` table:
+/// `route.read`, `route.write`, `route.readdir`, etc., each with `.default`.
+fn register_route_convenience<'lua>(
+    lua: &'lua Lua,
+    routes: &Arc<Mutex<Vec<RouteRegistration>>>,
+    funcs: &Arc<Mutex<HashMap<String, RegistryKey>>>,
+) -> Result<(), String> {
+    let route_global: mlua::Table = lua.globals().get("route")
+        .map_err(|e| format!("get route table: {e}"))?;
+
+    let bundles: Vec<(&str, Vec<&str>)> = vec![
+        ("read", vec!["lookup", "getattr", "open", "read", "release", "flush"]),
+        ("write", vec!["lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"]),
+        ("readdir", vec!["lookup", "getattr", "opendir", "readdir", "releasedir"]),
+        ("create", vec!["lookup", "getattr", "create", "open", "read", "write", "release", "flush"]),
+        ("unlink", vec!["unlink", "lookup", "getattr"]),
+        ("lookup", vec!["lookup"]),
+        ("getattr", vec!["getattr"]),
+        ("open", vec!["open"]),
+        ("release", vec!["release"]),
+        ("mkdir", vec!["mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"]),
+        ("all", vec![]), // empty ops = all ops
+    ];
+
+    for (name, ops) in bundles {
+        let bundle = make_route_bundle(lua, routes, funcs, &ops)?;
+        route_global.set(name, bundle).map_err(|e| format!("set route.{name}: {e}"))?;
+    }
+
+    Ok(())
+}
 // ---------------------------------------------------------------------------
 // Handler request / response
 // ---------------------------------------------------------------------------
@@ -273,90 +362,7 @@ impl HandlerRuntime {
         }
 
         // ── Route convenience wrappers ────────────────────────────────────
-        // These expand route.register() into shortcut functions like route.read(), route.write(), etc.
-        // Must run after the `route` table is set up but before the user script executes.
-        lua.load(r#"
-do
-    route.read = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "open", "read", "release", "flush"}, func)
-    end })
-    route.read.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "open", "read", "release", "flush"}, func)
-    end
-
-    route.write = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
-    end })
-    route.write.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
-    end
-
-    route.readdir = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end })
-    route.readdir.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end
-
-    route.create = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
-    end })
-    route.create.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
-    end
-
-    route.unlink = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"unlink", "lookup", "getattr"}, func)
-    end })
-    route.unlink.default = function(func)
-        route.register("/{*path}", {"unlink", "lookup", "getattr"}, func)
-    end
-
-    route.lookup = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "lookup", func)
-    end })
-    route.lookup.default = function(func)
-        route.register("/{*path}", "lookup", func)
-    end
-
-    route.getattr = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "getattr", func)
-    end })
-    route.getattr.default = function(func)
-        route.register("/{*path}", "getattr", func)
-    end
-
-    route.open = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "open", func)
-    end })
-    route.open.default = function(func)
-        route.register("/{*path}", "open", func)
-    end
-
-    route.release = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "release", func)
-    end })
-    route.release.default = function(func)
-        route.register("/{*path}", "release", func)
-    end
-
-    route.mkdir = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end })
-    route.mkdir.default = function(func)
-        route.register("/{*path}", {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end
-
-    route.all = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, true, func)
-    end })
-    route.all.default = function(func)
-        route.register("/{*path}", true, func)
-    end
-end
-"#)
-            .exec()
-            .map_err(|e| format!("route wrappers error: {e}"))?;
+        register_route_convenience(&lua, &routes, &funcs)?;
 
         // ── Build the `fuse` table ────────────────────────────────────────
         {
@@ -875,88 +881,7 @@ end
         }
 
         // Re-execute the convenience wrapper script too.
-        lua.load(r#"
-do
-    route.read = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "open", "read", "release", "flush"}, func)
-    end })
-    route.read.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "open", "read", "release", "flush"}, func)
-    end
-
-    route.write = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
-    end })
-    route.write.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "open", "read", "write", "release", "flush", "fsync", "create"}, func)
-    end
-
-    route.readdir = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end })
-    route.readdir.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end
-
-    route.create = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
-    end })
-    route.create.default = function(func)
-        route.register("/{*path}", {"lookup", "getattr", "create", "open", "read", "write", "release", "flush"}, func)
-    end
-
-    route.unlink = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"unlink", "lookup", "getattr"}, func)
-    end })
-    route.unlink.default = function(func)
-        route.register("/{*path}", {"unlink", "lookup", "getattr"}, func)
-    end
-
-    route.lookup = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "lookup", func)
-    end })
-    route.lookup.default = function(func)
-        route.register("/{*path}", "lookup", func)
-    end
-
-    route.getattr = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "getattr", func)
-    end })
-    route.getattr.default = function(func)
-        route.register("/{*path}", "getattr", func)
-    end
-
-    route.open = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "open", func)
-    end })
-    route.open.default = function(func)
-        route.register("/{*path}", "open", func)
-    end
-
-    route.release = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, "release", func)
-    end })
-    route.release.default = function(func)
-        route.register("/{*path}", "release", func)
-    end
-
-    route.mkdir = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end })
-    route.mkdir.default = function(func)
-        route.register("/{*path}", {"mkdir", "lookup", "getattr", "opendir", "readdir", "releasedir"}, func)
-    end
-
-    route.all = setmetatable({}, { __call = function(_, path, func)
-        route.register(path, true, func)
-    end })
-    route.all.default = function(func)
-        route.register("/{*path}", true, func)
-    end
-end
-"#)
-            .exec()
-            .map_err(|e| format!("route wrappers error: {e}"))?;
+        register_route_convenience(&lua, &routes, &funcs)?;
 
         // Execute the user script.
         lua.load(&bytecodes.script)
