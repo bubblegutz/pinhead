@@ -104,6 +104,10 @@ pub struct Config {
     pub tls_cert_path: Option<String>,
     /// Path to TLS private key PEM file, set via `ninep.tls_key(path)`.
     pub tls_key_path: Option<String>,
+    /// Max concurrent 9P/TCP/TLS connections (none = unlimited), set via `ninep.conn(n)`.
+    pub ninep_max_conns: Option<usize>,
+    /// Max concurrent SSH connections (none = unlimited), set via `sshfs.conn(n)`.
+    pub sshfs_max_conns: Option<usize>,
 }
 
 /// Compiled bytecode for all registered Lua handler functions, plus the
@@ -185,6 +189,8 @@ impl HandlerRuntime {
         let sshfs_userpasswds: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let tls_cert_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let tls_key_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let ninep_max_conns: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
+        let sshfs_max_conns: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
 
         // ── Build the `route` table ──────────────────────────────────────
         {
@@ -471,6 +477,20 @@ end
                     .map_err(|e| format!("{e}"))?;
             }
 
+            // ninep.conn(n) — max concurrent connections (queued)
+            {
+                let mc = ninep_max_conns.clone();
+                let fn_ = lua
+                    .create_function(move |_, n: usize| {
+                        *mc.lock().unwrap() = Some(n);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                ninep_table
+                    .set("conn", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
             lua.globals()
                 .set("ninep", ninep_table)
                 .map_err(|e| format!("{e}"))?;
@@ -562,6 +582,20 @@ end
                     .map_err(|e| format!("{e}"))?;
             }
 
+            // sshfs.conn(n) — max concurrent connections (queued)
+            {
+                let mc = sshfs_max_conns.clone();
+                let fn_ = lua
+                    .create_function(move |_, n: usize| {
+                        *mc.lock().unwrap() = Some(n);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("{e}"))?;
+                sshfs_table
+                    .set("conn", fn_)
+                    .map_err(|e| format!("{e}"))?;
+            }
+
             lua.globals()
                 .set("sshfs", sshfs_table)
                 .map_err(|e| format!("{e}"))?;
@@ -639,6 +673,8 @@ end
             sshfs_userpasswds: sshfs_userpasswds.lock().unwrap().clone(),
             tls_cert_path: tls_cert_path.lock().unwrap().clone(),
             tls_key_path: tls_key_path.lock().unwrap().clone(),
+            ninep_max_conns: ninep_max_conns.lock().unwrap().clone(),
+            sshfs_max_conns: sshfs_max_conns.lock().unwrap().clone(),
         };
 
         // ── Build SharedBytecodes ──────────────────────────────────────────

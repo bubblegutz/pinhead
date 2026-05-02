@@ -1077,9 +1077,14 @@ async fn handle_wstat(
 ///
 /// Each incoming connection is handled in its own task with the same
 /// protocol as the Unix socket variant.
+/// Start a 9P2000 server over TCP with the frame-based mux.
+///
+/// `max_conns` limits concurrent connections (None = unlimited).
+/// Beyond the limit, new connections queue in the accept loop.
 pub async fn serve_tcp(
     router_tx: mpsc::Sender<Request>,
     addr: &str,
+    max_conns: Option<usize>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     eprintln!("[9p-tcp] listening on {addr}");
@@ -1090,26 +1095,34 @@ pub async fn serve_tcp(
         msize: RwLock::new(8192),
     });
 
+    let sem = max_conns.map(|n| StdArc::new(tokio::sync::Semaphore::new(n)));
+
     loop {
         let (stream, peer) = listener.accept().await?;
         eprintln!("[9p-tcp] connection from {peer}");
+
+        // Acquire permit (queues if at max_conns).  Unwrap is safe:
+        // the semaphore is never closed.
+        let permit = match sem.clone() {
+            Some(s) => Some(s.acquire_owned().await.unwrap()),
+            None => None,
+        };
+
         let shared = shared.clone();
         let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
         let (frame_tx, frame_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
         let writer = MuxWriter { tx: frame_tx };
 
-        // Spawn mux reader in a separate task.
         tokio::spawn(async move {
             run_server_mux(stream, stream_tx, frame_rx).await;
+            drop(permit);
         });
 
         let mut streams: HashMap<u32, mpsc::UnboundedSender<Vec<u8>>> = HashMap::new();
         while let Some((stream_id, payload)) = stream_rx.recv().await {
             if let Some(tx) = streams.get(&stream_id) {
-                // Existing stream — deliver directly.
                 let _ = tx.send(payload);
             } else {
-                // New stream — create channel, spawn handler.
                 let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
                 let _ = tx.send(payload);
                 streams.insert(stream_id, tx);
@@ -1120,12 +1133,10 @@ pub async fn serve_tcp(
                     run_connection(mux, s).await;
                 });
             }
-            }
         }
     }
+}
 
-// ── UDP 9P2000 server ─────────────────────────────────────────────────
-//
 // ── TLS 9P2000 server ──────────────────────────────────────────────────
 
 /// Start a 9P2000 server over TCP with TLS encryption, then mux.

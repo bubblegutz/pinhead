@@ -119,8 +119,9 @@ async fn main() {
 
             } else if let Some(_addr) = listener.strip_prefix("tcp:") {
                 let addr = _addr.to_string();
+                let mc = cfg.ninep_max_conns;
                 let h = tokio::spawn(async move {
-                    if let Err(e) = frontend::ninep::serve_tcp(tx, &addr).await {
+                    if let Err(e) = frontend::ninep::serve_tcp(tx, &addr, mc).await {
                         eprintln!("[9p-tcp] error: {e}");
                     }
                 });
