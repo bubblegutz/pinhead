@@ -77,29 +77,19 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Dispatcher["dispatcher_loop"]
-        RX["mpsc::Receiver<HandlerRequest>"] --> ROUND["Round-robin select"]
+        RX["Receiver<HandlerRequest>"] --> ROUND["Round-robin select"]
         ROUND -->|mpsc::UnboundedSender| W1Q
         ROUND -->|mpsc::UnboundedSender| W2Q
-        ROUND -->|mpsc::UnboundedSender| WnQ
+        ROUND -->|mpsc::UnboundedSender| WNQ
     end
 
-    subgraph W1["Worker 1 (pinned thread)"]
-        W1Q["mpsc::UnboundedReceiver"] --> L1["Lua::new\nfrom_bytecodes"]
-        L1 --> CALL1["call_lua(HandlerRequest)"]
-        CALL1 -->|oneshot::Sender| ROUND
-    end
+    W1Q --> L1["Worker 1\ncall_lua"]
+    W2Q --> L2["Worker 2\ncall_lua"]
+    WNQ --> LN["Worker N\ncall_lua"]
 
-    subgraph W2["Worker 2 (pinned thread)"]
-        W2Q["mpsc::UnboundedReceiver"] --> L2["Lua::new\nfrom_bytecodes"]
-        L2 --> CALL2["call_lua(HandlerRequest)"]
-        CALL2 -->|oneshot::Sender| ROUND
-    end
-
-    subgraph Wn["Worker n (pinned thread)"]
-        WnQ["mpsc::UnboundedReceiver"] --> Ln["Lua::new\nfrom_bytecodes"]
-        Ln --> CALLn["call_lua(HandlerRequest)"]
-        CALLn -->|oneshot::Sender| ROUND
-    end
+    L1 -->|oneshot::Sender| ROUND
+    L2 -->|oneshot::Sender| ROUND
+    Ln -->|oneshot::Sender| ROUND
 ```
 
 ### 9P TCP Mux (per connection)
