@@ -844,8 +844,8 @@ end
         // when it references them.
         for (name, methods) in [
             ("fuse", &["mount", "unmount", "unmountall"] as &[&str]),
-            ("ninep", &["listen", "kill", "killall"]),
-            ("sshfs", &["listen", "kill", "killall", "password", "authorized_keys", "userpasswd"]),
+            ("ninep", &["listen", "kill", "killall", "tls_cert", "tls_key", "conn"] as &[&str]),
+            ("sshfs", &["listen", "kill", "killall", "password", "authorized_keys", "userpasswd", "conn"]),
         ] {
             let table = lua.create_table().map_err(|e| format!("{e}"))?;
             for method in methods {

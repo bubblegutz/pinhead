@@ -21,6 +21,9 @@ use worker::WorkerPool;
 
 #[tokio::main]
 async fn main() {
+    // Install ring CryptoProvider for rustls (both aws-lc-rs and ring are
+    // compiled in via tokio-rustls deps; rustls needs one set as default).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // ── 1. Load Lua script ──────────────────────────────────────────────
     let (script, cwd) = load_script();
 
