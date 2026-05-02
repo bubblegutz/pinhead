@@ -224,13 +224,11 @@ impl HandlerRuntime {
 
             // route.default(func)
             //
-            // NOTE: This stores the function in `default_handler` as an
-            // ultimate fallback inside call_lua(), but does NOT register
-            // a /{*path} route.  The per-bundle .default() helpers
-            // (route.read.default, route.write.default, etc.) DO register
-            // /{*path} routes with their respective op sets.  Bare
-            // route.default() without a bundle prefix is intentionally
-            // weak — it matches FUSE, which has no implicit catch-all.
+            // NOTE: Does NOT register a /{*path} route.  This is intentional
+            // — FUSE walks path components individually with no implicit
+            // catch-all, and all transports are standardized on the least
+            // capable (FUSE).  Use route.all.default or per-bundle .default()
+            // helpers (route.read.default, etc.) for catch-all behavior.
             {
                 let default_handler = default_handler.clone();
                 let default_fn = lua
@@ -1360,47 +1358,41 @@ package.path = "{cwd_str}/?.lua;{cwd_str}/?/init.lua;" .. __pinhead_orig_path
         // Add fs.cwd([path]) — getter/setter for Lua's CWD.
         let fn_ = lua
             .create_function(
-                |lua, path: Option<String>| -> Result<String, mlua::Error> {
-                    match path {
-                        Some(p) => {
-                            // Resolve relative paths against current CWD.
-                            let resolved = if p.starts_with('/') {
-                                p.clone()
-                            } else {
-                                let cur =
-                                    lua.globals().get::<_, String>("__pinhead_cwd")?;
-                                format!("{cur}/{p}")
-                            };
-
-                            // Validate it's a directory.
-                            if !std::path::Path::new(&resolved).is_dir() {
-                                return Err(mlua::Error::RuntimeError(format!(
-                                    "not a directory: {resolved}"
-                                )));
+                |lua, path: Option<String>| -> Result<mlua::Value, mlua::Error> {
+                    let result = (|| -> Result<String, String> {
+                        match path {
+                            Some(p) => {
+                                let resolved = if p.starts_with('/') {
+                                    p.clone()
+                                } else {
+                                    let cur = lua.globals()
+                                        .get::<_, String>("__pinhead_cwd")
+                                        .map_err(|e| format!("{e}"))?;
+                                    format!("{cur}/{p}")
+                                };
+                                if !std::path::Path::new(&resolved).is_dir() {
+                                    return Err(format!("not a directory: {resolved}"));
+                                }
+                                lua.globals()
+                                    .set("__pinhead_cwd", resolved.as_str())
+                                    .map_err(|e| format!("failed to set cwd: {e}"))?;
+                                let orig = lua.globals()
+                                    .get::<_, String>("__pinhead_orig_path")
+                                    .map_err(|e| format!("{e}"))?;
+                                let new_pp = format!("{resolved}/?.lua;{resolved}/?/init.lua;{orig}");
+                                lua.globals()
+                                    .get::<_, mlua::Table>("package")
+                                    .map_err(|e| format!("{e}"))?
+                                    .set("path", new_pp)
+                                    .map_err(|e| format!("{e}"))?;
+                                Ok(resolved)
                             }
-
-                            // Update __pinhead_cwd.
-                            lua.globals()
-                                .set("__pinhead_cwd", resolved.as_str())
-                                .map_err(|e| {
-                                    mlua::Error::RuntimeError(format!(
-                                        "failed to set cwd: {e}"
-                                    ))
-                                })?;
-
-                            // Rebuild package.path with new CWD.
-                            let orig = lua
-                                .globals()
-                                .get::<_, String>("__pinhead_orig_path")?;
-                            let new_pp = format!("{resolved}/?.lua;{resolved}/?/init.lua;{orig}");
-                            lua.globals()
-                                .get::<_, mlua::Table>("package")?
-                                .set("path", new_pp)?;
-
-                            Ok(resolved)
+                            None => lua.globals()
+                                .get::<_, String>("__pinhead_cwd")
+                                .map_err(|e| format!("{e}")),
                         }
-                        None => lua.globals().get::<_, String>("__pinhead_cwd"),
-                    }
+                    })();
+                    to_lua_str_result(lua, result)
                 },
             )
             .map_err(|e| format!("{e}"))?;

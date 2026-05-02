@@ -373,6 +373,44 @@ pub fn check_error(msg_type: u8, body: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+// ── 9P stat format ─────────────────────────────────────────────────────────
+//
+// 9P2000 stat entry layout (wire format):
+//   size[2]   — total entry size including this field
+//   type[2]   — file type
+//   dev[4]    — device number
+//   qid[13]   — QID (type[1], version[4], path[8])
+//   mode[4]   — permission bits
+//   atime[4]  — access time
+//   mtime[4]  — modification time
+//   length[8] — file length
+//   name[s]   — name (length[2] + data)
+//   uid[s]    — owner name
+//   gid[s]    — group name
+//   muid[s]   — modifier name
+//
+// name_len field starts at offset 41 from the start of the entry:
+//   size(2) + type(2) + dev(4) + qid(13) + mode(4) + atime(4) + mtime(4) + length(8) = 41
+fn parse_readdir_entries(raw: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut off = 0;
+    while off + 2 <= raw.len() {
+        let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
+        if entry_size == 0 || off + entry_size > raw.len() { break; }
+        const NAME_START: usize = 41;
+        if entry_size < NAME_START + 2 { off += entry_size; continue; }
+        let name_len = u16::from_le_bytes(raw[off+NAME_START..off+NAME_START+2].try_into().unwrap()) as usize;
+        if NAME_START + 2 + name_len > entry_size { off += entry_size; continue; }
+        let name = String::from_utf8_lossy(&raw[off+NAME_START+2..off+NAME_START+2+name_len]).to_string();
+        if !name.is_empty() && name != "." && name != ".." {
+            names.push(name);
+        }
+        off += entry_size + 2; // +2 for the size field itself
+    }
+    names.sort();
+    names
+}
+
 // ── 9P Client (stream-based: sock + tcp) ────────────────────────────────────
 
 pub struct NinepClient {
@@ -590,23 +628,7 @@ impl TestClient for NinepClient {
         let resp = self.read(0, dfid, 0, 65536)?;
         self.clunk(0, dfid)?;
         let raw = read_data(&resp);
-        let mut names = Vec::new();
-        let mut off = 0;
-        while off + 2 <= raw.len() {
-            let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
-            if entry_size == 0 || off + entry_size > raw.len() { break; }
-            // stat entry: type(2) dev(4) qid(13) mode(4) atime(4) mtime(4) length(8) name[s]
-            let name_start = 2 + 6 + 13 + 4 + 4 + 4 + 8; // = 41 (2 for size field)
-            if entry_size < name_start + 2 { off += entry_size; continue; }
-            let name_len = u16::from_le_bytes(raw[off+name_start..off+name_start+2].try_into().unwrap()) as usize;
-            if name_start + 2 + name_len > entry_size { off += entry_size; continue; }
-            let name = String::from_utf8_lossy(&raw[off+name_start+2..off+name_start+2+name_len]).to_string();
-            if !name.is_empty() && name != "." && name != ".." {
-                names.push(name);
-            }
-            off += entry_size + 2; // account for 2-byte size field
-        }
-        names.sort();
+        let names = parse_readdir_entries(raw);
         Ok(names)
     }
 }
@@ -806,22 +828,7 @@ impl TestClient for UdpNinepClient {
         let resp = self.read(0, dfid, 0, 65536)?;
         self.clunk(0, dfid)?;
         let raw = read_data(&resp);
-        let mut names = Vec::new();
-        let mut off = 0;
-        while off + 2 <= raw.len() {
-            let entry_size = u16::from_le_bytes(raw[off..off+2].try_into().unwrap()) as usize;
-            if entry_size == 0 || off + entry_size > raw.len() { break; }
-            let name_start = 41; // 2 for size field
-            if entry_size < name_start + 2 { off += entry_size; continue; }
-            let name_len = u16::from_le_bytes(raw[off+name_start..off+name_start+2].try_into().unwrap()) as usize;
-            if name_start + 2 + name_len > entry_size { off += entry_size; continue; }
-            let name = String::from_utf8_lossy(&raw[off+name_start+2..off+name_start+2+name_len]).to_string();
-            if !name.is_empty() && name != "." && name != ".." {
-                names.push(name);
-            }
-            off += entry_size + 2; // account for 2-byte size field
-        }
-        names.sort();
+        let names = parse_readdir_entries(raw);
         Ok(names)
     }
 }

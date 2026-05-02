@@ -91,3 +91,18 @@ fn concurrent_reads() {
     let passed = ok_count.load(Ordering::SeqCst);
     assert_eq!(passed, total, "{passed}/{total} concurrent reads succeeded");
 }
+
+// ── FUSE: basic read via mount point ───────────────────────────────────────
+
+#[test]
+fn fuse_basic_read() {
+    let id = unique_id();
+    let fuse_path = format!("/tmp/pinhead-e2e-fuse-{:x}", id);
+    let t = Transport::Fuse(fuse_path.clone());
+    let mut inst = PinheadInstance::start(SCRIPT, &t).expect("start");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let content = std::fs::read_to_string(format!("{fuse_path}/testfile.txt"))
+        .expect("FUSE read testfile.txt");
+    assert_eq!(content, "hello from pinhead test!");
+}
