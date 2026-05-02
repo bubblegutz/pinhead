@@ -62,7 +62,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph Frontends["Inbound Requests"]
+    subgraph Frontends["Frontends (all transports)"]
         FUSE
         P9SOCK
         P9TCP
@@ -183,4 +183,52 @@ flowchart LR
 ```mermaid
 flowchart LR
     U[UnixStream] -->|run_connection| R["9P Session\n(version → attach → walk → open → read → clunk)"]
+```
+
+### SSH/SFTP (per connection)
+
+```mermaid
+flowchart TB
+    subgraph Accept["TCP Listener"]
+        S[TcpListener] --> ACC[accept]
+    end
+    ACC --> SPAWN["tokio::spawn"]
+    SPAWN -->|russh handles auth| SESSION[SshSession\nper-connection Handler]
+    SESSION -->|sfp subsystem| CHAN["Channel<Msg>"]
+    CHAN --> SFTP["SFTP Request Loop"]
+    SFTP -->|"FsOperation::Read"| REQ["mpsc::Sender<Request> → Router"]
+    SFTP -->|"FsOperation::Write"| REQ
+    SFTP -->|"FsOperation::ReadDir"| REQ
+    SFTP -->|"FsOperation::Create"| REQ
+    SFTP -->|"FsOperation::Remove"| REQ
+    SFTP -->|"FsOperation::Rename"| REQ
+    SFTP -->|"FsOperation::MkDir"| REQ
+    SFTP -->|"FsOperation::Stat"| REQ
+```
+
+### FUSE (per mount point)
+
+```mermaid
+flowchart TB
+    subgraph Init["mount()"]
+        M[fuser::mount] --> FS[FuseFilesystem\nimplements Filesystem trait]
+    end
+
+    subgraph Callbacks["FUSE Callbacks (OS thread)"]
+        LOOKUP["fn lookup()"] --> SEND
+        GETATTR["fn getattr()"] --> SEND
+        READ["fn read()"] --> SEND
+        WRITE["fn write()"] --> SEND
+        READDIR["fn readdir()"] --> SEND
+        CREATE["fn create()"] --> SEND
+        RELEASE["fn release()"] --> SEND
+        SEND["send_req(FsOperation, path, data)"]
+    end
+
+    subgraph Bridge["Sync→Async Bridge"]
+        SEND --> BLOCK["blocking_send(Request)"]
+        BLOCK -->|mpsc::Sender| RTR["→ Router"]
+        SEND --> WAIT["block_on(reply_rx)"]
+        WAIT -->|oneshot::Receiver| REPLY["return response\nto FUSE kernel"]
+    end
 ```
